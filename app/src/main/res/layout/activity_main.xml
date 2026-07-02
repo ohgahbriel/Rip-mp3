@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="@color/bg"
+    android:padding="24dp">
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="RIP // MP3"
+        android:textColor="@color/accent"
+        android:textSize="36sp"
+        android:textStyle="bold"
+        android:letterSpacing="0.08" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="YouTube → MP3 · yt-dlp"
+        android:textColor="@color/dim"
+        android:textSize="12sp"
+        android:layout_marginBottom="24dp" />
+
+    <TextView style="@style/Label" android:text="YOUTUBE URL (VIDEO OR PLAYLIST)" />
+    <EditText
+        android:id="@+id/urlInput"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:hint="https://www.youtube.com/watch?v=…"
+        android:textColor="@color/text"
+        android:textColorHint="@color/dim"
+        android:backgroundTint="@color/accent"
+        android:inputType="textUri"
+        android:maxLines="2" />
+
+    <TextView style="@style/Label" android:text="QUALITY" android:layout_marginTop="20dp" />
+    <RadioGroup
+        android:id="@+id/qualityGroup"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal">
+        <RadioButton android:id="@+id/qBest" style="@style/Radio" android:text="Best" android:checked="true" />
+        <RadioButton android:id="@+id/q320" style="@style/Radio" android:text="320k" />
+        <RadioButton android:id="@+id/q192" style="@style/Radio" android:text="192k" />
+    </RadioGroup>
+
+    <Button
+        android:id="@+id/downloadBtn"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="28dp"
+        android:text="DOWNLOAD MP3"
+        android:textStyle="bold"
+        android:textColor="@color/bg"
+        android:backgroundTint="@color/accent" />
+
+    <ProgressBar
+        android:id="@+id/progressBar"
+        style="?android:attr/progressBarStyleHorizontal"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="20dp"
+        android:max="100"
+        android:progressTint="@color/accent"
+        android:visibility="gone" />
+
+    <TextView
+        android:id="@+id/statusText"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="Initializing yt-dlp…"
+        android:textColor="@color/dim"
+        android:textSize="13sp" />
+
+    <Button
+        android:id="@+id/cancelBtn"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="CANCEL"
+        android:textColor="@color/err"
+        android:backgroundTint="@color/panel"
+        android:visibility="gone" />
+
+    <View android:layout_width="0dp" android:layout_height="0dp" android:layout_weight="1" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Only download audio you have the rights to — your own uploads, Creative Commons content, or material with the owner's permission."
+        android:textColor="@color/dim"
+        android:textSize="11sp" />
+</LinearLayout>
