@@ -43,6 +43,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         b.downloadBtn.setOnClickListener { startDownload() }
+        b.playerBtn.setOnClickListener { startActivity(Intent(this, PlayerActivity::class.java)) }
         b.cancelBtn.setOnClickListener {
             YoutubeDL.getInstance().destroyProcessById(processId)
             job?.cancel()

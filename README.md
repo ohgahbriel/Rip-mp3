@@ -19,6 +19,7 @@ Every push to this repo automatically builds the APK via GitHub Actions:
 - Embedded thumbnail + metadata
 - Download archive — re-running a playlist only grabs new tracks
 - Auto-updates its internal yt-dlp on launch
+- **Built-in Winamp-style player** — green LCD deck, spectrum analyzer, marquee title, playlist editor, shuffle/repeat
 - MP3s save to `Android/data/com.dgabesilva.ripmp3/files/MP3/` and are scanned into the media library
 
 ## Legal note

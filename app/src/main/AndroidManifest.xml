@@ -23,5 +23,10 @@
                 <data android:mimeType="text/plain" />
             </intent-filter>
         </activity>
+
+        <activity
+            android:name=".PlayerActivity"
+            android:exported="false"
+            android:label="Player" />
     </application>
 </manifest>

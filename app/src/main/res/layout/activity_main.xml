@@ -85,6 +85,16 @@
         android:backgroundTint="@color/panel"
         android:visibility="gone" />
 
+    <Button
+        android:id="@+id/playerBtn"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="16dp"
+        android:text="▶ PLAYER"
+        android:textStyle="bold"
+        android:textColor="@color/accent"
+        android:backgroundTint="@color/panel" />
+
     <View android:layout_width="0dp" android:layout_height="0dp" android:layout_weight="1" />
 
     <TextView

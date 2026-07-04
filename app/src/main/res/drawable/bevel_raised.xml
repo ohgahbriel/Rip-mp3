@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Winamp-style raised chrome panel: light edge top-left, dark edge bottom-right -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item>
+        <shape><solid android:color="@color/waBevelLight" /></shape>
+    </item>
+    <item android:left="2dp" android:top="2dp">
+        <shape><solid android:color="@color/waBevelDark" /></shape>
+    </item>
+    <item android:left="2dp" android:top="2dp" android:right="2dp" android:bottom="2dp">
+        <shape><solid android:color="@color/waPanel" /></shape>
+    </item>
+</layer-list>
