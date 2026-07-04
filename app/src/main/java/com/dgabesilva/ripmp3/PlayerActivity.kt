@@ -1,11 +1,18 @@
 package com.dgabesilva.ripmp3
 
+import android.Manifest
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.content.ServiceConnection
+import android.content.pm.PackageManager
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
-import android.media.MediaPlayer
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
+import android.os.IBinder
 import android.os.Looper
 import android.view.View
 import android.view.ViewGroup
@@ -17,37 +24,59 @@ import com.dgabesilva.ripmp3.databinding.ActivityPlayerBinding
 import kotlinx.coroutines.*
 import java.io.File
 import java.util.Locale
-import kotlin.random.Random
 
-class PlayerActivity : AppCompatActivity() {
-
-    data class Track(val file: File, val title: String, var durationMs: Int = 0)
+class PlayerActivity : AppCompatActivity(), DownloadEngine.Listener {
 
     private lateinit var b: ActivityPlayerBinding
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private val ui = Handler(Looper.getMainLooper())
-
-    private var mp: MediaPlayer? = null
-    private var prepared = false
-    private val tracks = mutableListOf<Track>()
-    private var current = -1
-    private var shuffle = false
-    private var repeatAll = false
-    private var userSeeking = false
     private lateinit var adapter: PlaylistAdapter
+    private var svc: PlayerService? = null
+    private var userSeeking = false
 
     private val ticker = object : Runnable {
         override fun run() {
-            val p = mp
-            if (p != null && prepared) {
-                runCatching {
-                    val pos = p.currentPosition
-                    b.timeText.text = fmt(pos)
-                    if (!userSeeking) b.posBar.progress = pos / 1000
+            svc?.let { s ->
+                if (!userSeeking) {
+                    b.timeText.text = fmt(s.positionMs)
+                    b.posBar.max = maxOf(1, s.durationMs / 1000)
+                    b.posBar.progress = s.positionMs / 1000
                 }
+                if (b.spectrum.active != s.isPlaying) b.spectrum.active = s.isPlaying
             }
             ui.postDelayed(this, 250)
         }
+    }
+
+    private val serviceListener = object : PlayerService.Listener {
+        override fun onTrackChanged(index: Int, track: PlayerService.Track?) {
+            adapter.notifyDataSetChanged()
+            track?.let {
+                b.marquee.text = "${index + 1}. ${it.title}"
+                b.playlistView.smoothScrollToPosition(index)
+                scope.launch(Dispatchers.IO) { readAudioInfo(it.file) }
+            }
+        }
+        override fun onPlayState(playing: Boolean) {
+            b.spectrum.active = playing
+            svc?.let { b.posBar.max = maxOf(1, it.durationMs / 1000) }
+        }
+        override fun onTracksReloaded() {
+            adapter.notifyDataSetChanged()
+            val n = svc?.tracks?.size ?: 0
+            b.plCount.text = "$n tracks"
+            if (n == 0) b.marquee.text = "NO TRACKS — TAP GET SONGS"
+            else if (svc?.currentTrack == null) b.marquee.text = "RIP // MP3 — $n TRACKS LOADED. PRESS PLAY."
+        }
+    }
+
+    private val conn = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName, binder: IBinder) {
+            svc = (binder as PlayerService.LocalBinder).service
+            svc!!.listener = serviceListener
+            syncFromService()
+        }
+        override fun onServiceDisconnected(name: ComponentName) { svc = null }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -57,27 +86,43 @@ class PlayerActivity : AppCompatActivity() {
 
         b.marquee.isSelected = true // required for marquee scrolling
 
+        // Notification permission so the shade transport controls show (Android 13+)
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
+        }
+
+        DownloadEngine.init(this)
+
         adapter = PlaylistAdapter()
         b.playlistView.adapter = adapter
-        b.playlistView.setOnItemClickListener { _, _, pos, _ -> play(pos) }
+        b.playlistView.setOnItemClickListener { _, _, pos, _ -> svc?.play(pos) }
 
-        b.closeBtn.setOnClickListener { finish() }
-        b.btnPlay.setOnClickListener { if (current >= 0) resume() else play(0) }
-        b.btnPause.setOnClickListener { pause() }
-        b.btnStop.setOnClickListener { stopToZero() }
-        b.btnPrev.setOnClickListener { step(-1) }
-        b.btnNext.setOnClickListener { step(+1) }
-        b.btnEject.setOnClickListener { loadTracks() }
+        b.getSongsBtn.setOnClickListener { startActivity(Intent(this, DownloadActivity::class.java)) }
+        b.dlStrip.setOnClickListener { startActivity(Intent(this, DownloadActivity::class.java)) }
+        b.closeBtn.setOnClickListener { finish() } // music keeps playing via the service
+
+        b.btnPlay.setOnClickListener { svc?.resume() }
+        b.btnPause.setOnClickListener { svc?.pause() }
+        b.btnStop.setOnClickListener {
+            svc?.stopToZero()
+            b.timeText.text = fmt(0)
+            b.posBar.progress = 0
+        }
+        b.btnPrev.setOnClickListener { svc?.step(-1) }
+        b.btnNext.setOnClickListener { svc?.step(+1) }
+        b.btnEject.setOnClickListener { svc?.loadTracks() }
 
         b.btnShuffle.setOnClickListener {
-            shuffle = !shuffle
-            b.btnShuffle.isSelected = shuffle
-            b.btnShuffle.setTextColor(getColor(if (shuffle) R.color.waGreen else R.color.waText))
+            val s = svc ?: return@setOnClickListener
+            s.shuffle = !s.shuffle
+            styleToggle(b.btnShuffle, s.shuffle)
         }
         b.btnRepeat.setOnClickListener {
-            repeatAll = !repeatAll
-            b.btnRepeat.isSelected = repeatAll
-            b.btnRepeat.setTextColor(getColor(if (repeatAll) R.color.waGreen else R.color.waText))
+            val s = svc ?: return@setOnClickListener
+            s.repeatAll = !s.repeatAll
+            styleToggle(b.btnRepeat, s.repeatAll)
         }
 
         b.posBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
@@ -87,167 +132,55 @@ class PlayerActivity : AppCompatActivity() {
             override fun onStartTrackingTouch(sb: SeekBar) { userSeeking = true }
             override fun onStopTrackingTouch(sb: SeekBar) {
                 userSeeking = false
-                if (prepared) runCatching { mp?.seekTo(sb.progress * 1000) }
+                svc?.seekTo(sb.progress * 1000)
             }
         })
 
         b.volBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(sb: SeekBar, progress: Int, fromUser: Boolean) = applyVolume()
+            override fun onProgressChanged(sb: SeekBar, progress: Int, fromUser: Boolean) {
+                if (fromUser) svc?.volume = progress / 100f
+            }
             override fun onStartTrackingTouch(sb: SeekBar) {}
             override fun onStopTrackingTouch(sb: SeekBar) {}
         })
 
-        loadTracks()
+        bindService(Intent(this, PlayerService::class.java), conn, Context.BIND_AUTO_CREATE)
+        DownloadEngine.addListener(this)
         ui.post(ticker)
     }
 
-    // ---------- Playlist ----------
-
-    private fun loadTracks() {
-        scope.launch(Dispatchers.IO) {
-            val dir = File(getExternalFilesDir(null), "MP3")
-            val found = dir.walkTopDown()
-                .filter { it.isFile && it.extension.equals("mp3", ignoreCase = true) }
-                .sortedBy { it.absolutePath.lowercase(Locale.ROOT) }
-                .map { Track(it, it.nameWithoutExtension) }
-                .toList()
-
-            withContext(Dispatchers.Main) {
-                tracks.clear()
-                tracks.addAll(found)
-                current = -1
-                adapter.notifyDataSetChanged()
-                b.plCount.text = "${tracks.size} tracks"
-                b.marquee.text =
-                    if (tracks.isEmpty()) "NO MP3S FOUND — DOWNLOAD SOME TRACKS FIRST"
-                    else "RIP // MP3 — ${tracks.size} TRACKS LOADED. PRESS PLAY."
-            }
-
-            // Fill in durations in the background
-            found.forEachIndexed { i, t ->
-                t.durationMs = readDurationMs(t.file)
-                if (i % 8 == 7) withContext(Dispatchers.Main) { adapter.notifyDataSetChanged() }
-            }
-            withContext(Dispatchers.Main) { adapter.notifyDataSetChanged() }
-        }
-    }
-
-    // ---------- Transport ----------
-
-    private fun play(index: Int) {
-        if (tracks.isEmpty()) return
-        val idx = index.coerceIn(0, tracks.size - 1)
-        releasePlayer()
-        current = idx
-        val t = tracks[idx]
+    private fun syncFromService() {
+        val s = svc ?: return
         adapter.notifyDataSetChanged()
-        b.playlistView.smoothScrollToPosition(idx)
-        b.marquee.text = "${idx + 1}. ${t.title}"
-
-        val p = MediaPlayer()
-        mp = p
-        p.setOnPreparedListener {
-            prepared = true
-            b.posBar.max = it.duration / 1000
-            if (t.durationMs == 0) { t.durationMs = it.duration; adapter.notifyDataSetChanged() }
-            b.marquee.text = "${idx + 1}. ${t.title} (${fmt(it.duration)})"
-            applyVolume()
-            it.start()
-            b.spectrum.active = true
-        }
-        p.setOnCompletionListener { onTrackEnd() }
-        p.setOnErrorListener { _, _, _ ->
-            b.marquee.text = "ERROR READING: ${t.title}"
-            b.spectrum.active = false
-            true
-        }
-        try {
-            p.setDataSource(t.file.absolutePath)
-            p.prepareAsync()
-        } catch (e: Exception) {
-            b.marquee.text = "ERROR: ${e.message}"
-        }
-
-        scope.launch(Dispatchers.IO) { readAudioInfo(t.file) }
+        b.plCount.text = "${s.tracks.size} tracks"
+        b.volBar.progress = (s.volume * 100).toInt()
+        styleToggle(b.btnShuffle, s.shuffle)
+        styleToggle(b.btnRepeat, s.repeatAll)
+        b.spectrum.active = s.isPlaying
+        s.currentTrack?.let {
+            b.marquee.text = "${s.current + 1}. ${it.title}"
+            b.posBar.max = maxOf(1, s.durationMs / 1000)
+            scope.launch(Dispatchers.IO) { readAudioInfo(it.file) }
+        } ?: serviceListener.onTracksReloaded()
     }
 
-    private fun resume() {
-        val p = mp ?: return play(current.coerceAtLeast(0))
-        if (prepared && !p.isPlaying) {
-            runCatching { p.start() }
-            b.spectrum.active = true
-        }
+    private fun styleToggle(v: TextView, on: Boolean) {
+        v.isSelected = on
+        v.setTextColor(getColor(if (on) R.color.waGreen else R.color.waText))
     }
 
-    private fun pause() {
-        val p = mp ?: return
-        if (prepared && p.isPlaying) {
-            runCatching { p.pause() }
-            b.spectrum.active = false
-        }
+    // ---------- Download status strip ----------
+
+    override fun onDownloadStatus(s: DownloadEngine.Status) {
+        b.dlStrip.visibility = if (s.running || s.error) View.VISIBLE else View.GONE
+        b.dlText.text = "DL: ${s.message}"
+        b.dlText.setTextColor(getColor(if (s.error) R.color.err else R.color.waGreen))
+        b.dlBar.visibility = if (s.running && s.progress >= 0) View.VISIBLE else View.GONE
+        if (s.progress >= 0) b.dlBar.progress = s.progress
+        if (s.done) svc?.loadTracks() // new tracks straight into the playlist
     }
 
-    private fun stopToZero() {
-        val p = mp ?: return
-        if (prepared) runCatching {
-            p.pause()
-            p.seekTo(0)
-        }
-        b.timeText.text = fmt(0)
-        b.posBar.progress = 0
-        b.spectrum.active = false
-    }
-
-    private fun step(dir: Int) {
-        if (tracks.isEmpty()) return
-        val next = nextIndex(dir) ?: return
-        play(next)
-    }
-
-    private fun onTrackEnd() {
-        val next = nextIndex(+1)
-        if (next != null) play(next)
-        else {
-            b.spectrum.active = false
-            b.marquee.text = "END OF PLAYLIST"
-        }
-    }
-
-    private fun nextIndex(dir: Int): Int? {
-        if (tracks.isEmpty()) return null
-        if (shuffle && tracks.size > 1) {
-            var r: Int
-            do { r = Random.nextInt(tracks.size) } while (r == current)
-            return r
-        }
-        val n = current + dir
-        return when {
-            n in tracks.indices -> n
-            repeatAll -> (n + tracks.size) % tracks.size
-            else -> null
-        }
-    }
-
-    private fun applyVolume() {
-        val v = b.volBar.progress / 100f
-        runCatching { mp?.setVolume(v * v, v * v) } // squared for a natural taper
-    }
-
-    private fun releasePlayer() {
-        prepared = false
-        mp?.let { p -> runCatching { p.stop() }; runCatching { p.release() } }
-        mp = null
-    }
-
-    // ---------- Metadata ----------
-
-    private fun readDurationMs(f: File): Int {
-        val mmr = MediaMetadataRetriever()
-        return try {
-            mmr.setDataSource(f.absolutePath)
-            mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toIntOrNull() ?: 0
-        } catch (e: Exception) { 0 } finally { runCatching { mmr.release() } }
-    }
+    // ---------- Metadata chips ----------
 
     private suspend fun readAudioInfo(f: File) {
         var kbps: Int? = null
@@ -277,8 +210,13 @@ class PlayerActivity : AppCompatActivity() {
         }
         runCatching { ex.release() }
 
+        val isFlac = f.extension.equals("flac", true)
         withContext(Dispatchers.Main) {
-            b.kbpsText.text = if (kbps != null) "$kbps kbps" else "--- kbps"
+            b.kbpsText.text = when {
+                isFlac -> "FLAC"
+                kbps != null -> "$kbps kbps"
+                else -> "--- kbps"
+            }
             b.khzText.text = if (khz != null) String.format(Locale.US, "%.1f kHz", khz) else "-- kHz"
             b.chanText.text = when (channels) {
                 1 -> "mono"
@@ -297,18 +235,20 @@ class PlayerActivity : AppCompatActivity() {
     // ---------- Playlist adapter ----------
 
     private inner class PlaylistAdapter : BaseAdapter() {
-        override fun getCount() = tracks.size
-        override fun getItem(position: Int) = tracks[position]
+        private val list get() = svc?.tracks ?: emptyList<PlayerService.Track>()
+        override fun getCount() = list.size
+        override fun getItem(position: Int) = list[position]
         override fun getItemId(position: Int) = position.toLong()
 
         override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
             val v = convertView ?: layoutInflater.inflate(R.layout.playlist_item, parent, false)
-            val t = tracks[position]
+            val t = list[position]
             val title = v.findViewById<TextView>(R.id.trackTitle)
             val dur = v.findViewById<TextView>(R.id.trackDur)
-            title.text = "${position + 1}. ${t.title}"
+            val flacTag = if (t.file.extension.equals("flac", true)) " [FLAC]" else ""
+            title.text = "${position + 1}. ${t.title}$flacTag"
             dur.text = if (t.durationMs > 0) fmt(t.durationMs) else "-:--"
-            val isCurrent = position == current
+            val isCurrent = position == (svc?.current ?: -1)
             val color = getColor(if (isCurrent) R.color.waGold else R.color.waGreen)
             title.setTextColor(color)
             dur.setTextColor(color)
@@ -320,7 +260,9 @@ class PlayerActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         ui.removeCallbacks(ticker)
-        releasePlayer()
+        DownloadEngine.removeListener(this)
+        svc?.let { if (it.listener === serviceListener) it.listener = null }
+        runCatching { unbindService(conn) }
         scope.cancel()
     }
 }

@@ -13,14 +13,16 @@ Every push to this repo automatically builds the APK via GitHub Actions:
 
 ## Features
 
-- Paste a URL, or **share directly from the YouTube app** (Share → RIP MP3)
+- **Winamp-style player is the home screen** — green LCD deck, spectrum analyzer, marquee title, playlist editor, shuffle/repeat
+- **GET SONGS** button opens the download screen; paste a URL, or **share directly from the YouTube app** (Share → RIP MP3)
+- **Downloads run in the background** — start a download, go back to the player and listen while it finishes (live status strip on the player)
+- **Media controls in the notification shade** — pull down the status bar for prev / play-pause / next from anywhere; playback survives leaving the app
 - **Full playlist support** — auto-detected, saved to its own folder with numbered tracks, overall progress across the playlist
-- Quality: best VBR / 320k / 192k
+- Format/quality: MP3 (best VBR / 320k / 192k) or **FLAC**
 - Embedded thumbnail + metadata
 - Download archive — re-running a playlist only grabs new tracks
 - Auto-updates its internal yt-dlp on launch
-- **Built-in Winamp-style player** — green LCD deck, spectrum analyzer, marquee title, playlist editor, shuffle/repeat
-- MP3s save to `Android/data/com.dgabesilva.ripmp3/files/MP3/` and are scanned into the media library
+- Files save to `Android/data/com.dgabesilva.ripmp3/files/MP3/` and are scanned into the media library
 
 ## Legal note
 
