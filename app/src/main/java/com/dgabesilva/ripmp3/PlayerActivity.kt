@@ -86,12 +86,17 @@ class PlayerActivity : AppCompatActivity(), DownloadEngine.Listener {
 
         b.marquee.isSelected = true // required for marquee scrolling
 
-        // Notification permission so the shade transport controls show (Android 13+)
-        if (Build.VERSION.SDK_INT >= 33 &&
-            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-        ) {
-            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
+        // Shade controls (Android 13+) + audio library access to find songs on the phone
+        val perms = mutableListOf<String>()
+        if (Build.VERSION.SDK_INT >= 33) {
+            if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
+                perms += Manifest.permission.POST_NOTIFICATIONS
+            if (checkSelfPermission(Manifest.permission.READ_MEDIA_AUDIO) != PackageManager.PERMISSION_GRANTED)
+                perms += Manifest.permission.READ_MEDIA_AUDIO
+        } else if (checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
+            perms += Manifest.permission.READ_EXTERNAL_STORAGE
         }
+        if (perms.isNotEmpty()) requestPermissions(perms.toTypedArray(), 1)
 
         DownloadEngine.init(this)
 
@@ -162,6 +167,12 @@ class PlayerActivity : AppCompatActivity(), DownloadEngine.Listener {
             b.posBar.max = maxOf(1, s.durationMs / 1000)
             scope.launch(Dispatchers.IO) { readAudioInfo(it.file) }
         } ?: serviceListener.onTracksReloaded()
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        // Audio permission just granted → rescan so phone songs appear
+        svc?.loadTracks()
     }
 
     private fun styleToggle(v: TextView, on: Boolean) {

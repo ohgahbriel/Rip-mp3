@@ -5,9 +5,13 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Find and play songs anywhere on the phone -->
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
 
     <application
         android:allowBackup="true"
+        android:requestLegacyExternalStorage="true"
         android:label="RIP MP3"
         android:icon="@android:drawable/ic_btn_speak_now"
         android:theme="@style/Theme.RipMp3">

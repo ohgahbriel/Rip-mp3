@@ -1,12 +1,15 @@
 package com.dgabesilva.ripmp3
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.provider.MediaStore
 import android.graphics.drawable.Icon
 import android.media.MediaMetadata
 import android.media.MediaMetadataRetriever
@@ -106,27 +109,61 @@ class PlayerService : Service() {
 
     // ---------- Library ----------
 
+    fun hasAudioPermission(): Boolean =
+        if (Build.VERSION.SDK_INT >= 33)
+            checkSelfPermission(Manifest.permission.READ_MEDIA_AUDIO) == PackageManager.PERMISSION_GRANTED
+        else
+            checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+
     fun loadTracks() {
         thread {
+            val found = LinkedHashMap<String, Track>() // path -> track, keeps order + dedupes
+
+            // 1) Our own downloads (files/MP3, including playlist subfolders)
             val dir = File(getExternalFilesDir(null), "MP3")
-            val found = dir.walkTopDown()
+            dir.walkTopDown()
                 .filter {
                     it.isFile && (it.extension.equals("mp3", true) || it.extension.equals("flac", true))
                 }
                 .sortedBy { it.absolutePath.lowercase(Locale.ROOT) }
-                .map { Track(it, it.nameWithoutExtension) }
-                .toList()
+                .forEach { found[it.absolutePath] = Track(it, it.nameWithoutExtension) }
 
+            // 2) Every other song on the phone via the media library
+            if (hasAudioPermission()) runCatching {
+                val proj = arrayOf(
+                    MediaStore.Audio.Media.DATA,
+                    MediaStore.Audio.Media.TITLE,
+                    MediaStore.Audio.Media.DURATION
+                )
+                contentResolver.query(
+                    MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, proj,
+                    "${MediaStore.Audio.Media.IS_MUSIC} != 0", null,
+                    "${MediaStore.Audio.Media.TITLE} COLLATE NOCASE ASC"
+                )?.use { c ->
+                    val iData = c.getColumnIndexOrThrow(MediaStore.Audio.Media.DATA)
+                    val iTitle = c.getColumnIndexOrThrow(MediaStore.Audio.Media.TITLE)
+                    val iDur = c.getColumnIndexOrThrow(MediaStore.Audio.Media.DURATION)
+                    while (c.moveToNext()) {
+                        val path = c.getString(iData) ?: continue
+                        if (found.containsKey(path)) continue
+                        val f = File(path)
+                        if (!f.exists()) continue
+                        found[path] = Track(f, c.getString(iTitle) ?: f.nameWithoutExtension, c.getInt(iDur))
+                    }
+                }
+            }
+
+            val list = found.values.toList()
             main.post {
                 val playingFile = currentTrack?.file
                 tracks.clear()
-                tracks.addAll(found)
+                tracks.addAll(list)
                 current = if (playingFile != null) tracks.indexOfFirst { it.file == playingFile } else -1
                 listener?.onTracksReloaded()
             }
 
-            found.forEachIndexed { i, t ->
-                t.durationMs = readDurationMs(t.file)
+            list.forEachIndexed { i, t ->
+                if (t.durationMs == 0) t.durationMs = readDurationMs(t.file)
                 if (i % 8 == 7) main.post { listener?.onTracksReloaded() }
             }
             main.post { listener?.onTracksReloaded() }
