@@ -40,6 +40,12 @@
             </intent-filter>
         </activity>
 
+        <!-- Library explorer (artists / albums) -->
+        <activity
+            android:name=".BrowserActivity"
+            android:exported="false"
+            android:label="Browser" />
+
         <service
             android:name=".PlayerService"
             android:exported="false"

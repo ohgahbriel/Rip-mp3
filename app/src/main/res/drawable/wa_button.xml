@@ -3,23 +3,23 @@
 <selector xmlns:android="http://schemas.android.com/apk/res/android">
     <item android:state_pressed="true">
         <layer-list>
-            <item><shape><solid android:color="@color/waBevelDark" /></shape></item>
+            <item><shape><solid android:color="?attr/skinBevelDark" /></shape></item>
             <item android:left="2dp" android:top="2dp">
-                <shape><solid android:color="@color/waBevelLight" /></shape>
+                <shape><solid android:color="?attr/skinBevelLight" /></shape>
             </item>
             <item android:left="2dp" android:top="2dp" android:right="2dp" android:bottom="2dp">
-                <shape><solid android:color="@color/waPanelDeep" /></shape>
+                <shape><solid android:color="?attr/skinPanelDeep" /></shape>
             </item>
         </layer-list>
     </item>
     <item android:state_selected="true">
         <layer-list>
-            <item><shape><solid android:color="@color/waBevelDark" /></shape></item>
+            <item><shape><solid android:color="?attr/skinBevelDark" /></shape></item>
             <item android:left="2dp" android:top="2dp">
-                <shape><solid android:color="@color/waBevelLight" /></shape>
+                <shape><solid android:color="?attr/skinBevelLight" /></shape>
             </item>
             <item android:left="2dp" android:top="2dp" android:right="2dp" android:bottom="2dp">
-                <shape><solid android:color="@color/waPanelDeep" /></shape>
+                <shape><solid android:color="?attr/skinPanelDeep" /></shape>
             </item>
         </layer-list>
     </item>

@@ -33,7 +33,13 @@ import kotlin.random.Random
  */
 class PlayerService : Service() {
 
-    data class Track(val file: File, val title: String, var durationMs: Int = 0)
+    data class Track(
+        val file: File,
+        val title: String,
+        var durationMs: Int = 0,
+        var artist: String = "Unknown Artist",
+        var album: String = "Unknown Album"
+    )
 
     interface Listener {
         fun onTrackChanged(index: Int, track: Track?)
@@ -45,7 +51,9 @@ class PlayerService : Service() {
     private val binder = LocalBinder()
     override fun onBind(intent: Intent?): IBinder = binder
 
-    val tracks = mutableListOf<Track>()
+    val library = mutableListOf<Track>()   // every song found on the device
+    val tracks = mutableListOf<Track>()    // active play queue (what the playlist editor shows)
+    var queueName = "LIBRARY"; private set
     var current = -1; private set
     var shuffle = false
     var repeatAll = false
@@ -109,6 +117,36 @@ class PlayerService : Service() {
 
     // ---------- Library ----------
 
+    // ---------- Queue management ----------
+
+    fun setQueue(list: List<Track>, name: String, startIndex: Int = -1, autoplay: Boolean = false) {
+        val playingFile = currentTrack?.file
+        tracks.clear()
+        tracks.addAll(list)
+        queueName = name
+        current = if (playingFile != null) tracks.indexOfFirst { it.file == playingFile } else -1
+        listener?.onTracksReloaded()
+        if (autoplay && tracks.isNotEmpty()) play(if (startIndex >= 0) startIndex else 0)
+    }
+
+    /** Appends without duplicates. Returns how many were actually added. */
+    fun enqueue(list: List<Track>): Int {
+        val have = tracks.mapTo(HashSet()) { it.file.absolutePath }
+        val add = list.filter { it.file.absolutePath !in have }
+        tracks.addAll(add)
+        listener?.onTracksReloaded()
+        return add.size
+    }
+
+    fun newQueue() = setQueue(emptyList(), "NEW LIST")
+
+    fun resetToLibrary() = setQueue(library.toList(), "LIBRARY")
+
+    fun renameQueue(name: String) {
+        queueName = name
+        listener?.onTracksReloaded()
+    }
+
     fun hasAudioPermission(): Boolean =
         if (Build.VERSION.SDK_INT >= 33)
             checkSelfPermission(Manifest.permission.READ_MEDIA_AUDIO) == PackageManager.PERMISSION_GRANTED
@@ -126,14 +164,20 @@ class PlayerService : Service() {
                     it.isFile && (it.extension.equals("mp3", true) || it.extension.equals("flac", true))
                 }
                 .sortedBy { it.absolutePath.lowercase(Locale.ROOT) }
-                .forEach { found[it.absolutePath] = Track(it, it.nameWithoutExtension) }
+                .forEach {
+                    val album = it.parentFile?.name?.takeIf { n -> n != "MP3" } ?: "Downloads"
+                    found[it.absolutePath] =
+                        Track(it, it.nameWithoutExtension, artist = "RIP DOWNLOADS", album = album)
+                }
 
             // 2) Every other song on the phone via the media library
             if (hasAudioPermission()) runCatching {
                 val proj = arrayOf(
                     MediaStore.Audio.Media.DATA,
                     MediaStore.Audio.Media.TITLE,
-                    MediaStore.Audio.Media.DURATION
+                    MediaStore.Audio.Media.DURATION,
+                    MediaStore.Audio.Media.ARTIST,
+                    MediaStore.Audio.Media.ALBUM
                 )
                 contentResolver.query(
                     MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, proj,
@@ -143,22 +187,42 @@ class PlayerService : Service() {
                     val iData = c.getColumnIndexOrThrow(MediaStore.Audio.Media.DATA)
                     val iTitle = c.getColumnIndexOrThrow(MediaStore.Audio.Media.TITLE)
                     val iDur = c.getColumnIndexOrThrow(MediaStore.Audio.Media.DURATION)
+                    val iArtist = c.getColumnIndexOrThrow(MediaStore.Audio.Media.ARTIST)
+                    val iAlbum = c.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM)
                     while (c.moveToNext()) {
                         val path = c.getString(iData) ?: continue
-                        if (found.containsKey(path)) continue
+                        val artist = c.getString(iArtist)
+                            ?.takeIf { it.isNotBlank() && it != "<unknown>" } ?: "Unknown Artist"
+                        val album = c.getString(iAlbum)
+                            ?.takeIf { it.isNotBlank() && it != "<unknown>" } ?: "Unknown Album"
+                        val existing = found[path]
+                        if (existing != null) {
+                            // Our download, already indexed — take the real tags
+                            if (c.getInt(iDur) > 0) existing.durationMs = c.getInt(iDur)
+                            if (artist != "Unknown Artist") existing.artist = artist
+                            if (album != "Unknown Album") existing.album = album
+                            continue
+                        }
                         val f = File(path)
                         if (!f.exists()) continue
-                        found[path] = Track(f, c.getString(iTitle) ?: f.nameWithoutExtension, c.getInt(iDur))
+                        found[path] = Track(
+                            f, c.getString(iTitle) ?: f.nameWithoutExtension,
+                            c.getInt(iDur), artist, album
+                        )
                     }
                 }
             }
 
             val list = found.values.toList()
             main.post {
-                val playingFile = currentTrack?.file
-                tracks.clear()
-                tracks.addAll(list)
-                current = if (playingFile != null) tracks.indexOfFirst { it.file == playingFile } else -1
+                library.clear()
+                library.addAll(list)
+                if (queueName == "LIBRARY") {
+                    val playingFile = currentTrack?.file
+                    tracks.clear()
+                    tracks.addAll(list)
+                    current = if (playingFile != null) tracks.indexOfFirst { it.file == playingFile } else -1
+                }
                 listener?.onTracksReloaded()
             }
 

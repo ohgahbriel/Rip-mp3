@@ -13,8 +13,11 @@ Every push to this repo automatically builds the APK via GitHub Actions:
 
 ## Features
 
-- **Winamp-style player is the home screen** — green LCD deck, spectrum analyzer, marquee title, playlist editor, shuffle/repeat
-- **Finds all songs on your phone** — scans the Android media library (with your permission) and merges it into the playlist below your downloads; plays MP3, FLAC, M4A, OGG and anything else Android supports
+- **Winamp-style player is the home screen** — LCD deck, spectrum analyzer, marquee title, playlist editor, shuffle/repeat; every screen wears the same chrome
+- **3 skins** — CLASSIC GREEN, ICE BLUE, HELLFIRE (≡ menu → SKINS); spectrum analyzer recolors to match
+- **Playlist system** — ≡ menu: new / save / load / delete playlists, stored as standard `.m3u` files; long-press a track to remove it from the queue
+- **Library browser** — browse every song by ARTIST or ALBUM; tap to play, ▶ PLAY ALL a group, ＋ QUEUE it into the current playlist, hold a track to queue just that one
+- **Finds all songs on your phone** — scans the Android media library (with your permission) and merges it below your downloads; plays MP3, FLAC, M4A, OGG and anything else Android supports
 - **GET SONGS** button opens the download screen; paste a URL, or **share directly from the YouTube app** (Share → RIP MP3)
 - **Downloads run in the background** — start a download, go back to the player and listen while it finishes (live status strip on the player)
 - **Media controls in the notification shade** — pull down the status bar for prev / play-pause / next from anywhere; playback survives leaving the app

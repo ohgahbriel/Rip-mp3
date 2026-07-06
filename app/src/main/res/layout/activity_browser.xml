@@ -1,0 +1,143 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="?attr/skinBg"
+    android:padding="10dp">
+
+    <!-- Title bar -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:background="@drawable/bevel_raised"
+        android:gravity="center_vertical"
+        android:paddingLeft="10dp"
+        android:paddingRight="6dp"
+        android:paddingTop="5dp"
+        android:paddingBottom="5dp">
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="◢ RIP // MP3 — BROWSER"
+            android:textColor="?attr/skinAccent"
+            android:textStyle="bold"
+            android:textSize="12sp"
+            android:letterSpacing="0.18" />
+
+        <TextView
+            android:id="@+id/closeBtn"
+            android:layout_width="30dp"
+            android:layout_height="26dp"
+            android:background="@drawable/wa_button"
+            android:gravity="center"
+            android:text="✕"
+            android:textColor="?attr/skinText"
+            android:textSize="12sp" />
+    </LinearLayout>
+
+    <!-- Artist / Album tabs -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:layout_marginTop="8dp">
+
+        <TextView
+            android:id="@+id/tabArtists"
+            style="@style/WaChip"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="36dp"
+            android:layout_marginEnd="4dp"
+            android:text="ARTISTS" />
+
+        <TextView
+            android:id="@+id/tabAlbums"
+            style="@style/WaChip"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="36dp"
+            android:text="ALBUMS" />
+    </LinearLayout>
+
+    <!-- Breadcrumb LCD -->
+    <TextView
+        android:id="@+id/crumb"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:background="@drawable/lcd_sunken"
+        android:paddingLeft="8dp"
+        android:paddingRight="8dp"
+        android:paddingTop="6dp"
+        android:paddingBottom="6dp"
+        android:singleLine="true"
+        android:ellipsize="end"
+        android:text="ALL ARTISTS"
+        android:textColor="?attr/skinLcd"
+        android:textSize="12sp"
+        android:fontFamily="monospace" />
+
+    <!-- Group actions (track level only) -->
+    <LinearLayout
+        android:id="@+id/actionRow"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:layout_marginTop="8dp"
+        android:visibility="gone">
+
+        <TextView
+            android:id="@+id/playAllBtn"
+            style="@style/WaChip"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="36dp"
+            android:layout_marginEnd="4dp"
+            android:textColor="?attr/skinAccent"
+            android:textStyle="bold"
+            android:text="▶ PLAY ALL" />
+
+        <TextView
+            android:id="@+id/queueBtn"
+            style="@style/WaChip"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="36dp"
+            android:text="＋ QUEUE" />
+    </LinearLayout>
+
+    <!-- Results -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:orientation="vertical"
+        android:background="@drawable/bevel_raised"
+        android:layout_marginTop="8dp"
+        android:padding="8dp">
+
+        <ListView
+            android:id="@+id/browserList"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:background="@drawable/lcd_sunken"
+            android:divider="@null"
+            android:padding="4dp" />
+    </LinearLayout>
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:text="TAP GROUP TO OPEN · TAP TRACK TO PLAY · HOLD TRACK TO QUEUE"
+        android:textColor="?attr/skinText"
+        android:textSize="9sp"
+        android:letterSpacing="0.1"
+        android:gravity="center"
+        android:fontFamily="monospace" />
+</LinearLayout>

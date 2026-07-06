@@ -1,11 +1,15 @@
 package com.dgabesilva.ripmp3
 
 import android.Manifest
+import android.app.Dialog
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
+import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.ColorDrawable
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
@@ -14,9 +18,13 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.widget.BaseAdapter
+import android.widget.EditText
+import android.widget.LinearLayout
+import android.widget.PopupWindow
 import android.widget.SeekBar
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
@@ -33,6 +41,7 @@ class PlayerActivity : AppCompatActivity(), DownloadEngine.Listener {
     private lateinit var adapter: PlaylistAdapter
     private var svc: PlayerService? = null
     private var userSeeking = false
+    private val density by lazy { resources.displayMetrics.density }
 
     private val ticker = object : Runnable {
         override fun run() {
@@ -63,10 +72,13 @@ class PlayerActivity : AppCompatActivity(), DownloadEngine.Listener {
         }
         override fun onTracksReloaded() {
             adapter.notifyDataSetChanged()
-            val n = svc?.tracks?.size ?: 0
-            b.plCount.text = "$n tracks"
-            if (n == 0) b.marquee.text = "NO TRACKS — TAP GET SONGS"
-            else if (svc?.currentTrack == null) b.marquee.text = "RIP // MP3 — $n TRACKS LOADED. PRESS PLAY."
+            val s = svc ?: return
+            b.plName.text = s.queueName
+            b.plCount.text = "${s.tracks.size} trk"
+            if (s.tracks.isEmpty() && s.currentTrack == null)
+                b.marquee.text =
+                    if (s.queueName == "LIBRARY") "NO TRACKS — TAP GET SONGS"
+                    else "EMPTY LIST — ADD FROM BROWSER"
         }
     }
 
@@ -80,11 +92,13 @@ class PlayerActivity : AppCompatActivity(), DownloadEngine.Listener {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        Skin.apply(this)
         super.onCreate(savedInstanceState)
         b = ActivityPlayerBinding.inflate(layoutInflater)
         setContentView(b.root)
 
         b.marquee.isSelected = true // required for marquee scrolling
+        b.spectrum.setPalette(Skin.spectrum(this))
 
         // Shade controls (Android 13+) + audio library access to find songs on the phone
         val perms = mutableListOf<String>()
@@ -103,8 +117,21 @@ class PlayerActivity : AppCompatActivity(), DownloadEngine.Listener {
         adapter = PlaylistAdapter()
         b.playlistView.adapter = adapter
         b.playlistView.setOnItemClickListener { _, _, pos, _ -> svc?.play(pos) }
+        b.playlistView.setOnItemLongClickListener { _, _, pos, _ ->
+            // Long-press removes a track from the queue (not from disk)
+            val s = svc ?: return@setOnItemLongClickListener true
+            if (pos in s.tracks.indices) {
+                val t = s.tracks[pos]
+                val list = s.tracks.toMutableList().also { it.removeAt(pos) }
+                s.setQueue(list, s.queueName)
+                flashMarquee("REMOVED: ${t.title}")
+            }
+            true
+        }
 
+        b.menuBtn.setOnClickListener { showMenu(it) }
         b.getSongsBtn.setOnClickListener { startActivity(Intent(this, DownloadActivity::class.java)) }
+        b.browserBtn.setOnClickListener { startActivity(Intent(this, BrowserActivity::class.java)) }
         b.dlStrip.setOnClickListener { startActivity(Intent(this, DownloadActivity::class.java)) }
         b.closeBtn.setOnClickListener { finish() } // music keeps playing via the service
 
@@ -154,10 +181,17 @@ class PlayerActivity : AppCompatActivity(), DownloadEngine.Listener {
         ui.post(ticker)
     }
 
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        // Audio permission just granted → rescan so phone songs appear
+        svc?.loadTracks()
+    }
+
     private fun syncFromService() {
         val s = svc ?: return
         adapter.notifyDataSetChanged()
-        b.plCount.text = "${s.tracks.size} tracks"
+        b.plName.text = s.queueName
+        b.plCount.text = "${s.tracks.size} trk"
         b.volBar.progress = (s.volume * 100).toInt()
         styleToggle(b.btnShuffle, s.shuffle)
         styleToggle(b.btnRepeat, s.repeatAll)
@@ -169,15 +203,193 @@ class PlayerActivity : AppCompatActivity(), DownloadEngine.Listener {
         } ?: serviceListener.onTracksReloaded()
     }
 
-    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        // Audio permission just granted → rescan so phone songs appear
-        svc?.loadTracks()
-    }
-
     private fun styleToggle(v: TextView, on: Boolean) {
         v.isSelected = on
-        v.setTextColor(getColor(if (on) R.color.waGreen else R.color.waText))
+        v.setTextColor(skinColor(if (on) R.attr.skinLcd else R.attr.skinText))
+    }
+
+    private fun flashMarquee(msg: String) {
+        val prev = b.marquee.text
+        b.marquee.text = msg
+        ui.postDelayed({ if (b.marquee.text == msg) b.marquee.text = prev }, 2200)
+    }
+
+    // ---------- ≡ menu ----------
+
+    private fun showMenu(anchor: View) {
+        val panel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = getDrawable(R.drawable.bevel_raised)
+            val p = (5 * density).toInt()
+            setPadding(p, p, p, p)
+            minimumWidth = (210 * density).toInt()
+        }
+        val popup = PopupWindow(panel, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, true)
+        popup.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        popup.elevation = 12f
+
+        fun item(label: String, action: () -> Unit) {
+            panel.addView(TextView(this).apply {
+                text = label
+                setTextColor(skinColor(R.attr.skinText))
+                textSize = 12f
+                typeface = Typeface.MONOSPACE
+                letterSpacing = 0.08f
+                setPadding((12 * density).toInt(), (10 * density).toInt(), (12 * density).toInt(), (10 * density).toInt())
+                setOnClickListener { popup.dismiss(); action() }
+            })
+        }
+        fun sep() {
+            panel.addView(View(this).apply {
+                setBackgroundColor(skinColor(R.attr.skinBevelDark))
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, (1.5f * density).toInt()
+                ).apply { topMargin = (3 * density).toInt(); bottomMargin = (3 * density).toInt() }
+            })
+        }
+
+        item("⇩ GET SONGS") { startActivity(Intent(this, DownloadActivity::class.java)) }
+        item("◫ BROWSER") { startActivity(Intent(this, BrowserActivity::class.java)) }
+        sep()
+        item("＋ NEW PLAYLIST") { svc?.newQueue(); flashMarquee("NEW EMPTY LIST — ADD FROM BROWSER") }
+        item("💾 SAVE PLAYLIST") { savePlaylistDialog() }
+        item("▤ LOAD PLAYLIST") { loadPlaylistDialog() }
+        item("✕ DELETE PLAYLIST") { deletePlaylistDialog() }
+        item("♫ WHOLE LIBRARY") { svc?.resetToLibrary() }
+        sep()
+        item("◨ SKINS") { skinsDialog() }
+        item("⟳ RESCAN LIBRARY") { svc?.loadTracks(); flashMarquee("RESCANNING…") }
+
+        popup.showAsDropDown(anchor, 0, (4 * density).toInt())
+    }
+
+    // ---------- Winamp-style dialogs ----------
+
+    private fun waDialog(title: String, build: (LinearLayout, Dialog) -> Unit) {
+        val dialog = Dialog(this)
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = getDrawable(R.drawable.bevel_raised)
+            val p = (10 * density).toInt()
+            setPadding(p, p, p, p)
+        }
+        root.addView(TextView(this).apply {
+            text = "◢ $title"
+            setTextColor(skinColor(R.attr.skinAccent))
+            textSize = 12f
+            typeface = Typeface.MONOSPACE
+            setTypeface(typeface, Typeface.BOLD)
+            letterSpacing = 0.15f
+            setPadding(0, 0, 0, (8 * density).toInt())
+        })
+        build(root, dialog)
+        dialog.setContentView(root)
+        dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        dialog.window?.setLayout((300 * density).toInt(), ViewGroup.LayoutParams.WRAP_CONTENT)
+        dialog.show()
+    }
+
+    private fun waListDialog(title: String, items: List<String>, empty: String, onPick: (Int) -> Unit) {
+        waDialog(title) { root, dialog ->
+            if (items.isEmpty()) {
+                root.addView(TextView(this).apply {
+                    text = empty
+                    setTextColor(skinColor(R.attr.skinText))
+                    textSize = 12f
+                    typeface = Typeface.MONOSPACE
+                    setPadding((6 * density).toInt(), (6 * density).toInt(), (6 * density).toInt(), (10 * density).toInt())
+                })
+            }
+            items.forEachIndexed { i, name ->
+                root.addView(TextView(this).apply {
+                    text = name
+                    setTextColor(skinColor(R.attr.skinLcd))
+                    textSize = 13f
+                    typeface = Typeface.MONOSPACE
+                    background = getDrawable(R.drawable.lcd_sunken)
+                    setPadding((10 * density).toInt(), (9 * density).toInt(), (10 * density).toInt(), (9 * density).toInt())
+                    layoutParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+                    ).apply { bottomMargin = (4 * density).toInt() }
+                    setOnClickListener { dialog.dismiss(); onPick(i) }
+                })
+            }
+        }
+    }
+
+    private fun savePlaylistDialog() {
+        val s = svc ?: return
+        if (s.tracks.isEmpty()) { flashMarquee("NOTHING TO SAVE — QUEUE IS EMPTY"); return }
+        waDialog("SAVE PLAYLIST") { root, dialog ->
+            val input = EditText(this).apply {
+                setText(if (s.queueName != "LIBRARY" && s.queueName != "NEW LIST") s.queueName else "")
+                hint = "playlist name"
+                setTextColor(skinColor(R.attr.skinLcd))
+                setHintTextColor(skinColor(R.attr.skinBevelLight))
+                textSize = 14f
+                typeface = Typeface.MONOSPACE
+                background = getDrawable(R.drawable.lcd_sunken)
+                setPadding((10 * density).toInt(), (10 * density).toInt(), (10 * density).toInt(), (10 * density).toInt())
+            }
+            root.addView(input)
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(0, (8 * density).toInt(), 0, 0)
+            }
+            fun btn(label: String, action: () -> Unit) = TextView(this).apply {
+                text = label
+                gravity = Gravity.CENTER
+                setTextColor(skinColor(R.attr.skinAccent))
+                textSize = 12f
+                typeface = Typeface.MONOSPACE
+                setTypeface(typeface, Typeface.BOLD)
+                background = getDrawable(R.drawable.wa_button)
+                layoutParams = LinearLayout.LayoutParams(0, (38 * density).toInt(), 1f)
+                    .apply { marginEnd = (4 * density).toInt() }
+                setOnClickListener { action() }
+            }
+            row.addView(btn("SAVE") {
+                val name = input.text.toString().trim()
+                if (name.isNotEmpty()) {
+                    val clean = PlaylistStore.save(this, name, s.tracks)
+                    s.renameQueue(clean)
+                    flashMarquee("SAVED: $clean (${s.tracks.size} TRK)")
+                    dialog.dismiss()
+                }
+            })
+            row.addView(btn("CANCEL") { dialog.dismiss() })
+            root.addView(row)
+        }
+    }
+
+    private fun loadPlaylistDialog() {
+        val names = PlaylistStore.list(this)
+        waListDialog("LOAD PLAYLIST", names, "NO SAVED PLAYLISTS YET") { i ->
+            val s = svc ?: return@waListDialog
+            val byPath = s.library.associateBy { it.file.absolutePath }
+            val loaded = PlaylistStore.load(this, names[i]).map { f ->
+                byPath[f.absolutePath] ?: PlayerService.Track(f, f.nameWithoutExtension)
+            }
+            s.setQueue(loaded, names[i])
+            flashMarquee("LOADED: ${names[i]} (${loaded.size} TRK)")
+        }
+    }
+
+    private fun deletePlaylistDialog() {
+        val names = PlaylistStore.list(this)
+        waListDialog("DELETE PLAYLIST", names, "NO SAVED PLAYLISTS YET") { i ->
+            PlaylistStore.delete(this, names[i])
+            flashMarquee("DELETED: ${names[i]}")
+        }
+    }
+
+    private fun skinsDialog() {
+        waListDialog("SELECT SKIN", Skin.NAMES, "") { i ->
+            if (i != Skin.get(this)) {
+                Skin.set(this, i)
+                recreate()
+            }
+        }
     }
 
     // ---------- Download status strip ----------
@@ -185,10 +397,10 @@ class PlayerActivity : AppCompatActivity(), DownloadEngine.Listener {
     override fun onDownloadStatus(s: DownloadEngine.Status) {
         b.dlStrip.visibility = if (s.running || s.error) View.VISIBLE else View.GONE
         b.dlText.text = "DL: ${s.message}"
-        b.dlText.setTextColor(getColor(if (s.error) R.color.err else R.color.waGreen))
+        b.dlText.setTextColor(if (s.error) getColor(R.color.err) else skinColor(R.attr.skinLcd))
         b.dlBar.visibility = if (s.running && s.progress >= 0) View.VISIBLE else View.GONE
         if (s.progress >= 0) b.dlBar.progress = s.progress
-        if (s.done) svc?.loadTracks() // new tracks straight into the playlist
+        if (s.done) svc?.loadTracks() // new tracks straight into the library
     }
 
     // ---------- Metadata chips ----------
@@ -260,10 +472,10 @@ class PlayerActivity : AppCompatActivity(), DownloadEngine.Listener {
             title.text = "${position + 1}. ${t.title}$flacTag"
             dur.text = if (t.durationMs > 0) fmt(t.durationMs) else "-:--"
             val isCurrent = position == (svc?.current ?: -1)
-            val color = getColor(if (isCurrent) R.color.waGold else R.color.waGreen)
+            val color = skinColor(if (isCurrent) R.attr.skinAccent else R.attr.skinLcd)
             title.setTextColor(color)
             dur.setTextColor(color)
-            v.setBackgroundColor(getColor(if (isCurrent) R.color.waPanelDeep else android.R.color.transparent))
+            v.setBackgroundColor(if (isCurrent) skinColor(R.attr.skinPanelDeep) else Color.TRANSPARENT)
             return v
         }
     }

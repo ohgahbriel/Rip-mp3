@@ -25,6 +25,17 @@ class SpectrumView @JvmOverloads constructor(
             if (value) postInvalidateOnAnimation()
         }
 
+    private var colLow = Color.rgb(0, 232, 0)
+    private var colMid = Color.rgb(232, 216, 0)
+    private var colHigh = Color.rgb(240, 40, 40)
+    private var colPeak = Color.rgb(190, 190, 210)
+
+    /** Skin palette: [low, mid, high, peakCap]. */
+    fun setPalette(p: IntArray) {
+        colLow = p[0]; colMid = p[1]; colHigh = p[2]; colPeak = p[3]
+        invalidate()
+    }
+
     private val bars = 19
     private val segments = 14
     private val heights = FloatArray(bars)
@@ -65,15 +76,15 @@ class SpectrumView @JvmOverloads constructor(
                 for (s in 0 until lit) {
                     val frac = s / segments.toFloat()
                     paint.color = when {
-                        frac < 0.55f -> Color.rgb(0, 232, 0)
-                        frac < 0.80f -> Color.rgb(232, 216, 0)
-                        else -> Color.rgb(240, 40, 40)
+                        frac < 0.55f -> colLow
+                        frac < 0.80f -> colMid
+                        else -> colHigh
                     }
                     val bottom = inset + h - s * cellH
                     canvas.drawRect(x, bottom - cellH + gap, x + barW - gap, bottom, paint)
                 }
                 if (peaks[i] > 0.01f) {
-                    paint.color = Color.rgb(190, 190, 210)
+                    paint.color = colPeak
                     val py = inset + h - peaks[i] * h
                     canvas.drawRect(x, py, x + barW - gap, py + 2 * density, paint)
                 }

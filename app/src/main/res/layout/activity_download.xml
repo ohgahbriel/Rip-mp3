@@ -3,112 +3,165 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
-    android:background="@color/bg"
-    android:padding="24dp">
+    android:background="?attr/skinBg"
+    android:padding="10dp">
 
+    <!-- Title bar -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="horizontal"
-        android:gravity="center_vertical">
+        android:background="@drawable/bevel_raised"
+        android:gravity="center_vertical"
+        android:paddingLeft="10dp"
+        android:paddingRight="6dp"
+        android:paddingTop="5dp"
+        android:paddingBottom="5dp">
 
         <TextView
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:text="GET SONGS"
-            android:textColor="@color/accent"
-            android:textSize="36sp"
+            android:text="◢ RIP // MP3 — GET SONGS"
+            android:textColor="?attr/skinAccent"
             android:textStyle="bold"
-            android:letterSpacing="0.08" />
+            android:textSize="12sp"
+            android:letterSpacing="0.18" />
 
-        <Button
+        <TextView
             android:id="@+id/backBtn"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="◀ PLAYER"
-            android:textColor="@color/accent"
-            android:backgroundTint="@color/panel" />
+            android:layout_width="30dp"
+            android:layout_height="26dp"
+            android:background="@drawable/wa_button"
+            android:gravity="center"
+            android:text="✕"
+            android:textColor="?attr/skinText"
+            android:textSize="12sp" />
     </LinearLayout>
 
-    <TextView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="YouTube → MP3 / FLAC · yt-dlp"
-        android:textColor="@color/dim"
-        android:textSize="12sp"
-        android:layout_marginBottom="24dp" />
-
-    <TextView style="@style/Label" android:text="YOUTUBE URL (VIDEO OR PLAYLIST)" />
-    <EditText
-        android:id="@+id/urlInput"
+    <!-- URL entry panel -->
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:hint="https://www.youtube.com/watch?v=…"
-        android:textColor="@color/text"
-        android:textColorHint="@color/dim"
-        android:backgroundTint="@color/accent"
-        android:inputType="textUri"
-        android:maxLines="2" />
-
-    <TextView style="@style/Label" android:text="FORMAT / QUALITY" android:layout_marginTop="20dp" />
-    <RadioGroup
-        android:id="@+id/qualityGroup"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal">
-        <RadioButton android:id="@+id/qBest" style="@style/Radio" android:text="Best" android:checked="true" />
-        <RadioButton android:id="@+id/q320" style="@style/Radio" android:text="320k" />
-        <RadioButton android:id="@+id/q192" style="@style/Radio" android:text="192k" />
-        <RadioButton android:id="@+id/qFlac" style="@style/Radio" android:text="FLAC" />
-    </RadioGroup>
-
-    <Button
-        android:id="@+id/downloadBtn"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="28dp"
-        android:text="DOWNLOAD"
-        android:textStyle="bold"
-        android:textColor="@color/bg"
-        android:backgroundTint="@color/accent" />
-
-    <ProgressBar
-        android:id="@+id/progressBar"
-        style="?android:attr/progressBarStyleHorizontal"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="20dp"
-        android:max="100"
-        android:progressTint="@color/accent"
-        android:visibility="gone" />
-
-    <TextView
-        android:id="@+id/statusText"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:background="@drawable/bevel_raised"
         android:layout_marginTop="8dp"
-        android:text="Initializing yt-dlp…"
-        android:textColor="@color/dim"
-        android:textSize="13sp" />
+        android:padding="10dp">
 
-    <Button
-        android:id="@+id/cancelBtn"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
-        android:text="CANCEL"
-        android:textColor="@color/err"
-        android:backgroundTint="@color/panel"
-        android:visibility="gone" />
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="YOUTUBE URL (VIDEO OR PLAYLIST)"
+            android:textColor="?attr/skinText"
+            android:textSize="10sp"
+            android:letterSpacing="0.15" />
 
-    <TextView
+        <EditText
+            android:id="@+id/urlInput"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:background="@drawable/lcd_sunken"
+            android:padding="10dp"
+            android:hint="https://www.youtube.com/watch?v=…"
+            android:textColor="?attr/skinLcd"
+            android:textColorHint="?attr/skinBevelLight"
+            android:textSize="13sp"
+            android:fontFamily="monospace"
+            android:inputType="textUri"
+            android:maxLines="2" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:text="FORMAT / QUALITY"
+            android:textColor="?attr/skinText"
+            android:textSize="10sp"
+            android:letterSpacing="0.15" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginTop="6dp">
+
+            <TextView android:id="@+id/chipBest" style="@style/WaChip" android:layout_width="0dp" android:layout_weight="1" android:layout_marginEnd="4dp" android:text="BEST" />
+            <TextView android:id="@+id/chip320" style="@style/WaChip" android:layout_width="0dp" android:layout_weight="1" android:layout_marginEnd="4dp" android:text="320K" />
+            <TextView android:id="@+id/chip192" style="@style/WaChip" android:layout_width="0dp" android:layout_weight="1" android:layout_marginEnd="4dp" android:text="192K" />
+            <TextView android:id="@+id/chipFlac" style="@style/WaChip" android:layout_width="0dp" android:layout_weight="1" android:text="FLAC" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/downloadBtn"
+            android:layout_width="match_parent"
+            android:layout_height="46dp"
+            android:layout_marginTop="12dp"
+            android:background="@drawable/wa_button"
+            android:gravity="center"
+            android:text="⇩ DOWNLOAD"
+            android:textColor="?attr/skinAccent"
+            android:textStyle="bold"
+            android:textSize="14sp"
+            android:letterSpacing="0.15" />
+    </LinearLayout>
+
+    <!-- Status panel -->
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="16dp"
-        android:text="Downloads keep running in the background — go back to the player and listen while they finish."
-        android:textColor="@color/accent"
-        android:textSize="12sp" />
+        android:orientation="vertical"
+        android:background="@drawable/bevel_raised"
+        android:layout_marginTop="8dp"
+        android:padding="10dp">
+
+        <TextView
+            android:id="@+id/statusText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:background="@drawable/lcd_sunken"
+            android:padding="8dp"
+            android:text="Initializing yt-dlp…"
+            android:textColor="?attr/skinLcd"
+            android:textSize="12sp"
+            android:fontFamily="monospace" />
+
+        <ProgressBar
+            android:id="@+id/progressBar"
+            style="?android:attr/progressBarStyleHorizontal"
+            android:layout_width="match_parent"
+            android:layout_height="8dp"
+            android:layout_marginTop="8dp"
+            android:max="100"
+            android:progressTint="?attr/skinLcd"
+            android:progressBackgroundTint="?attr/skinBevelLight"
+            android:visibility="gone" />
+
+        <TextView
+            android:id="@+id/cancelBtn"
+            android:layout_width="wrap_content"
+            android:layout_height="34dp"
+            android:layout_marginTop="8dp"
+            android:background="@drawable/wa_button"
+            android:gravity="center"
+            android:paddingLeft="16dp"
+            android:paddingRight="16dp"
+            android:text="⏹ CANCEL"
+            android:textColor="@color/err"
+            android:textSize="11sp"
+            android:letterSpacing="0.1"
+            android:visibility="gone" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="DOWNLOADS KEEP RUNNING IN THE BACKGROUND — GO BACK AND LISTEN WHILE THEY FINISH."
+            android:textColor="?attr/skinText"
+            android:textSize="9sp"
+            android:letterSpacing="0.08"
+            android:fontFamily="monospace" />
+    </LinearLayout>
 
     <View android:layout_width="0dp" android:layout_height="0dp" android:layout_weight="1" />
 
@@ -116,6 +169,6 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:text="Only download audio you have the rights to — your own uploads, Creative Commons content, or material with the owner's permission."
-        android:textColor="@color/dim"
-        android:textSize="11sp" />
+        android:textColor="?attr/skinBevelLight"
+        android:textSize="10sp" />
 </LinearLayout>
