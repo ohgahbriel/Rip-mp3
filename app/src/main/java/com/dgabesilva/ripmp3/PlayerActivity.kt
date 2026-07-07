@@ -130,10 +130,7 @@ class PlayerActivity : AppCompatActivity(), DownloadEngine.Listener {
         }
 
         b.menuBtn.setOnClickListener { showMenu(it) }
-        b.getSongsBtn.setOnClickListener { startActivity(Intent(this, DownloadActivity::class.java)) }
-        b.browserBtn.setOnClickListener { startActivity(Intent(this, BrowserActivity::class.java)) }
         b.dlStrip.setOnClickListener { startActivity(Intent(this, DownloadActivity::class.java)) }
-        b.closeBtn.setOnClickListener { finish() } // music keeps playing via the service
 
         b.btnPlay.setOnClickListener { svc?.resume() }
         b.btnPause.setOnClickListener { svc?.pause() }

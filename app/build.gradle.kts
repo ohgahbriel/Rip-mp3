@@ -11,8 +11,8 @@ android {
         applicationId = "com.dgabesilva.ripmp3"
         minSdk = 24
         targetSdk = 34
-        versionCode = 5
-        versionName = "2.0"
+        versionCode = 6
+        versionName = "2.1"
         ndk {
             // youtubedl-android ships native libs for these ABIs
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64")
