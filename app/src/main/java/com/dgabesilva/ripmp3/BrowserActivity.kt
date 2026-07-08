@@ -127,9 +127,9 @@ class BrowserActivity : AppCompatActivity() {
         b.tabArtists.setOnClickListener { switchMode(Mode.ARTISTS) }
         b.tabAlbums.setOnClickListener { switchMode(Mode.ALBUMS) }
 
-        b.hdrTitle.setOnClickListener { applySort(SortField.TITLE) }
-        b.hdrSecondary.setOnClickListener { applySort(SortField.SECONDARY) }
-        b.hdrTime.setOnClickListener { applySort(SortField.TIME) }
+        b.browserHeader.hdrTitle.setOnClickListener { applySort(SortField.TITLE) }
+        b.browserHeader.hdrSecondary.setOnClickListener { applySort(SortField.SECONDARY) }
+        b.browserHeader.hdrTime.setOnClickListener { applySort(SortField.TIME) }
 
         b.playAllBtn.setOnClickListener {
             val key = groupKey ?: return@setOnClickListener
@@ -183,9 +183,9 @@ class BrowserActivity : AppCompatActivity() {
     private fun updateSortHeader() {
         fun label(base: String, field: SortField) =
             if (sortField == field) "$base ${if (sortAsc) "▲" else "▼"}" else base
-        b.hdrTitle.text = label("TITLE", SortField.TITLE)
-        b.hdrSecondary.text = label(if (mode == Mode.ARTISTS) "ALBUM" else "ARTIST", SortField.SECONDARY)
-        b.hdrTime.text = label("TIME", SortField.TIME)
+        b.browserHeader.hdrTitle.text = label("TITLE", SortField.TITLE)
+        b.browserHeader.hdrSecondary.text = label(if (mode == Mode.ARTISTS) "ALBUM" else "ARTIST", SortField.SECONDARY)
+        b.browserHeader.hdrTime.text = label("TIME", SortField.TIME)
     }
 
     private fun currentDisplayedTracks(): List<PlayerService.Track> = rows.mapNotNull { it.track }
@@ -210,7 +210,7 @@ class BrowserActivity : AppCompatActivity() {
             rows = groups.map { (name, list) -> Row(name, "", "${list.size} trk ▸", null) }
             b.crumb.text = if (mode == Mode.ARTISTS) "ALL ARTISTS (${groups.size})" else "ALL ALBUMS (${groups.size})"
             b.actionRow.visibility = View.GONE
-            b.browserHeader.visibility = View.GONE
+            b.browserHeader.root.visibility = View.GONE
         } else {
             val base = groups[key] ?: emptyList()
             val ordered = applyCustomOrder(key, base)
@@ -221,7 +221,7 @@ class BrowserActivity : AppCompatActivity() {
             }
             b.crumb.text = "▸ ${key.uppercase(Locale.ROOT)} (${list.size})"
             b.actionRow.visibility = View.VISIBLE
-            b.browserHeader.visibility = View.VISIBLE
+            b.browserHeader.root.visibility = View.VISIBLE
             updateSortHeader()
         }
         adapter.notifyDataSetChanged()

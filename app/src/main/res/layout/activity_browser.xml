@@ -126,7 +126,7 @@
             android:layout_height="match_parent"
             android:orientation="vertical">
 
-            <include layout="@layout/browser_header" />
+            <include android:id="@+id/browserHeader" layout="@layout/browser_header" />
 
             <androidx.recyclerview.widget.RecyclerView
                 android:id="@+id/browserList"

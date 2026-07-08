@@ -242,7 +242,7 @@
                 android:fontFamily="monospace" />
         </LinearLayout>
 
-        <include layout="@layout/queue_header" />
+        <include android:id="@+id/queueHeader" layout="@layout/queue_header" />
 
         <androidx.recyclerview.widget.RecyclerView
             android:id="@+id/playlistView"

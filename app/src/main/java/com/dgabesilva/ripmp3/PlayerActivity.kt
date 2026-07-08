@@ -150,9 +150,9 @@ class PlayerActivity : AppCompatActivity(), DownloadEngine.Listener {
         b.playlistView.adapter = adapter
         itemTouchHelper.attachToRecyclerView(b.playlistView)
 
-        b.hdrTitle.setOnClickListener { applySort(SortField.TITLE) }
-        b.hdrArtist.setOnClickListener { applySort(SortField.ARTIST) }
-        b.hdrTime.setOnClickListener { applySort(SortField.TIME) }
+        b.queueHeader.hdrTitle.setOnClickListener { applySort(SortField.TITLE) }
+        b.queueHeader.hdrArtist.setOnClickListener { applySort(SortField.ARTIST) }
+        b.queueHeader.hdrTime.setOnClickListener { applySort(SortField.TIME) }
         updateSortHeader()
 
         b.menuBtn.setOnClickListener { showMenu(it) }
@@ -243,9 +243,9 @@ class PlayerActivity : AppCompatActivity(), DownloadEngine.Listener {
     private fun updateSortHeader() {
         fun label(base: String, field: SortField) =
             if (sortField == field) "$base ${if (sortAsc) "▲" else "▼"}" else base
-        b.hdrTitle.text = label("TITLE", SortField.TITLE)
-        b.hdrArtist.text = label("ARTIST", SortField.ARTIST)
-        b.hdrTime.text = label("TIME", SortField.TIME)
+        b.queueHeader.hdrTitle.text = label("TITLE", SortField.TITLE)
+        b.queueHeader.hdrArtist.text = label("ARTIST", SortField.ARTIST)
+        b.queueHeader.hdrTime.text = label("TIME", SortField.TIME)
     }
 
     private fun styleToggle(v: TextView, on: Boolean) {
