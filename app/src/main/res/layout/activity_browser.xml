@@ -121,13 +121,21 @@
         android:layout_marginTop="8dp"
         android:padding="8dp">
 
-        <ListView
-            android:id="@+id/browserList"
+        <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="match_parent"
-            android:background="@drawable/lcd_sunken"
-            android:divider="@null"
-            android:padding="4dp" />
+            android:orientation="vertical">
+
+            <include layout="@layout/browser_header" />
+
+            <androidx.recyclerview.widget.RecyclerView
+                android:id="@+id/browserList"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1"
+                android:background="@drawable/lcd_sunken"
+                android:padding="4dp" />
+        </LinearLayout>
     </LinearLayout>
 
     <TextView

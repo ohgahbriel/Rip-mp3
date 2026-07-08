@@ -138,6 +138,24 @@ class PlayerService : Service() {
         return add.size
     }
 
+    /** Drag-and-drop reorder: moves the track at [from] to [to], keeping playback position stable. */
+    fun moveTrack(from: Int, to: Int) {
+        if (from == to || from !in tracks.indices || to !in tracks.indices) return
+        val playingFile = currentTrack?.file
+        val t = tracks.removeAt(from)
+        tracks.add(to, t)
+        current = if (playingFile != null) tracks.indexOfFirst { it.file == playingFile } else current
+        listener?.onTracksReloaded()
+    }
+
+    /** Column-header sort: reorders the queue in place, keeping playback position stable. */
+    fun sortTracks(comparator: Comparator<Track>) {
+        val playingFile = currentTrack?.file
+        tracks.sortWith(comparator)
+        current = if (playingFile != null) tracks.indexOfFirst { it.file == playingFile } else current
+        listener?.onTracksReloaded()
+    }
+
     fun newQueue() = setQueue(emptyList(), "NEW LIST")
 
     fun resetToLibrary() = setQueue(library.toList(), "LIBRARY")

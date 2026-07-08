@@ -9,12 +9,15 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
-import android.widget.BaseAdapter
 import android.widget.TextView
 import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
+import androidx.recyclerview.widget.ItemTouchHelper
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
 import com.dgabesilva.ripmp3.databinding.ActivityBrowserBinding
 import java.util.Locale
 
@@ -35,7 +38,64 @@ class BrowserActivity : AppCompatActivity() {
     private var rows = listOf<Row>()
     private lateinit var adapter: RowAdapter
 
-    private data class Row(val label: String, val right: String, val track: PlayerService.Track?)
+    private data class Row(val label: String, val secondary: String, val right: String, val track: PlayerService.Track?)
+
+    // ---------- Column sort (track-level rows only) ----------
+    private enum class SortField { TITLE, SECONDARY, TIME }
+    private var sortField: SortField? = null
+    private var sortAsc = true
+
+    // ---------- Manual drag order (persisted per artist/album group) ----------
+    private val itemTouchHelper by lazy {
+        ItemTouchHelper(object : ItemTouchHelper.SimpleCallback(0, 0) {
+            override fun getMovementFlags(rv: RecyclerView, vh: RecyclerView.ViewHolder): Int {
+                // Only track-level rows (inside an open group) can be dragged
+                if (groupKey == null) return 0
+                return makeMovementFlags(ItemTouchHelper.UP or ItemTouchHelper.DOWN, 0)
+            }
+            override fun onMove(rv: RecyclerView, vh: RecyclerView.ViewHolder, target: RecyclerView.ViewHolder): Boolean {
+                val from = vh.bindingAdapterPosition
+                val to = target.bindingAdapterPosition
+                if (from == RecyclerView.NO_POSITION || to == RecyclerView.NO_POSITION) return false
+                if (rows.getOrNull(from)?.track == null || rows.getOrNull(to)?.track == null) return false
+                rows = rows.toMutableList().apply { add(to, removeAt(from)) }
+                adapter.notifyItemMoved(from, to)
+                val key = groupKey ?: return true
+                saveCustomOrder(key, rows.mapNotNull { it.track?.file?.absolutePath })
+                // A manual drag supersedes whatever column sort was active
+                sortField = null
+                updateSortHeader()
+                return true
+            }
+            override fun onSwiped(vh: RecyclerView.ViewHolder, direction: Int) {}
+            override fun isLongPressDragEnabled() = false // dragging only starts from the handle
+        })
+    }
+
+    private fun orderPrefKey(key: String) = "${mode.name}|$key"
+
+    private fun loadCustomOrder(key: String): List<String>? =
+        getSharedPreferences(PREFS, MODE_PRIVATE).getString(orderPrefKey(key), null)
+            ?.split("\n")?.filter { it.isNotEmpty() }
+
+    private fun saveCustomOrder(key: String, paths: List<String>) {
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+            .putString(orderPrefKey(key), paths.joinToString("\n"))
+            .apply()
+    }
+
+    /** Applies any saved manual order for this group; new/unknown tracks land at the end. */
+    private fun applyCustomOrder(key: String, list: List<PlayerService.Track>): List<PlayerService.Track> {
+        val order = loadCustomOrder(key) ?: return list
+        val byPath = list.associateBy { it.file.absolutePath }
+        val ordered = order.mapNotNull { byPath[it] }
+        val remaining = list.filter { it.file.absolutePath !in order }
+        return ordered + remaining
+    }
+
+    private companion object {
+        const val PREFS = "browser_order"
+    }
 
     private val serviceListener = object : PlayerService.Listener {
         override fun onTrackChanged(index: Int, track: PlayerService.Track?) {}
@@ -59,41 +119,30 @@ class BrowserActivity : AppCompatActivity() {
         setContentView(b.root)
 
         adapter = RowAdapter()
+        b.browserList.layoutManager = LinearLayoutManager(this)
         b.browserList.adapter = adapter
+        itemTouchHelper.attachToRecyclerView(b.browserList)
 
         b.closeBtn.setOnClickListener { finish() }
         b.tabArtists.setOnClickListener { switchMode(Mode.ARTISTS) }
         b.tabAlbums.setOnClickListener { switchMode(Mode.ALBUMS) }
 
+        b.hdrTitle.setOnClickListener { applySort(SortField.TITLE) }
+        b.hdrSecondary.setOnClickListener { applySort(SortField.SECONDARY) }
+        b.hdrTime.setOnClickListener { applySort(SortField.TIME) }
+
         b.playAllBtn.setOnClickListener {
-            val (name, list) = currentGroup() ?: return@setOnClickListener
-            svc?.setQueue(list, name, 0, autoplay = true)
+            val key = groupKey ?: return@setOnClickListener
+            val list = currentDisplayedTracks()
+            if (list.isEmpty()) return@setOnClickListener
+            svc?.setQueue(list, key, 0, autoplay = true)
             finish()
         }
         b.queueBtn.setOnClickListener {
-            val (_, list) = currentGroup() ?: return@setOnClickListener
+            val list = currentDisplayedTracks()
+            if (list.isEmpty()) return@setOnClickListener
             val added = svc?.enqueue(list) ?: 0
             flash("QUEUED +$added")
-        }
-
-        b.browserList.setOnItemClickListener { _, _, pos, _ ->
-            val row = rows.getOrNull(pos) ?: return@setOnItemClickListener
-            if (row.track == null) {
-                groupKey = row.label
-                rebuild()
-            } else {
-                val (name, list) = currentGroup() ?: return@setOnItemClickListener
-                svc?.setQueue(list, name, list.indexOf(row.track), autoplay = true)
-                finish()
-            }
-        }
-        b.browserList.setOnItemLongClickListener { _, _, pos, _ ->
-            val row = rows.getOrNull(pos)
-            if (row?.track != null) {
-                val added = svc?.enqueue(listOf(row.track)) ?: 0
-                flash(if (added > 0) "QUEUED: ${row.track.title}" else "ALREADY IN QUEUE")
-            }
-            true
         }
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
@@ -108,14 +157,38 @@ class BrowserActivity : AppCompatActivity() {
     private fun switchMode(m: Mode) {
         mode = m
         groupKey = null
+        sortField = null
         rebuild()
     }
 
-    private fun currentGroup(): Pair<String, List<PlayerService.Track>>? {
-        val key = groupKey ?: return null
-        val list = groups[key] ?: return null
-        return key to list
+    private fun applySort(field: SortField) {
+        if ((groups[groupKey] ?: emptyList()).size < 2) return
+        sortAsc = if (sortField == field) !sortAsc else true
+        sortField = field
+        rebuild()
     }
+
+    private fun sortedTracks(list: List<PlayerService.Track>): List<PlayerService.Track> {
+        val field = sortField ?: return list
+        val cmp: Comparator<PlayerService.Track> = when (field) {
+            SortField.TITLE -> compareBy { it.title.lowercase(Locale.ROOT) }
+            SortField.SECONDARY -> compareBy {
+                (if (mode == Mode.ARTISTS) it.album else it.artist).lowercase(Locale.ROOT)
+            }
+            SortField.TIME -> compareBy { it.durationMs }
+        }
+        return if (sortAsc) list.sortedWith(cmp) else list.sortedWith(cmp.reversed())
+    }
+
+    private fun updateSortHeader() {
+        fun label(base: String, field: SortField) =
+            if (sortField == field) "$base ${if (sortAsc) "▲" else "▼"}" else base
+        b.hdrTitle.text = label("TITLE", SortField.TITLE)
+        b.hdrSecondary.text = label(if (mode == Mode.ARTISTS) "ALBUM" else "ARTIST", SortField.SECONDARY)
+        b.hdrTime.text = label("TIME", SortField.TIME)
+    }
+
+    private fun currentDisplayedTracks(): List<PlayerService.Track> = rows.mapNotNull { it.track }
 
     private fun rebuild() {
         val lib = svc?.library ?: emptyList()
@@ -134,14 +207,22 @@ class BrowserActivity : AppCompatActivity() {
 
         val key = groupKey
         if (key == null) {
-            rows = groups.map { (name, list) -> Row(name, "${list.size} trk ▸", null) }
+            rows = groups.map { (name, list) -> Row(name, "", "${list.size} trk ▸", null) }
             b.crumb.text = if (mode == Mode.ARTISTS) "ALL ARTISTS (${groups.size})" else "ALL ALBUMS (${groups.size})"
             b.actionRow.visibility = View.GONE
+            b.browserHeader.visibility = View.GONE
         } else {
-            val list = groups[key] ?: emptyList()
-            rows = list.map { Row(it.title, fmt(it.durationMs), it) }
+            val base = groups[key] ?: emptyList()
+            val ordered = applyCustomOrder(key, base)
+            val list = sortedTracks(ordered)
+            rows = list.map {
+                val secondary = if (mode == Mode.ARTISTS) it.album else it.artist
+                Row(it.title, secondary, fmt(it.durationMs), it)
+            }
             b.crumb.text = "▸ ${key.uppercase(Locale.ROOT)} (${list.size})"
             b.actionRow.visibility = View.VISIBLE
+            b.browserHeader.visibility = View.VISIBLE
+            updateSortHeader()
         }
         adapter.notifyDataSetChanged()
     }
@@ -162,23 +243,61 @@ class BrowserActivity : AppCompatActivity() {
         return if (ms <= 0) "-:--" else String.format(Locale.US, "%d:%02d", s / 60, s % 60)
     }
 
-    private inner class RowAdapter : BaseAdapter() {
-        override fun getCount() = rows.size
-        override fun getItem(position: Int) = rows[position]
-        override fun getItemId(position: Int) = position.toLong()
+    private inner class RowAdapter : RecyclerView.Adapter<RowAdapter.VH>() {
+        inner class VH(view: View) : RecyclerView.ViewHolder(view) {
+            val handle: TextView = view.findViewById(R.id.dragHandle)
+            val title: TextView = view.findViewById(R.id.trackTitle)
+            val secondary: TextView = view.findViewById(R.id.trackSecondary)
+            val right: TextView = view.findViewById(R.id.trackDur)
+        }
 
-        override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
-            val v = convertView ?: layoutInflater.inflate(R.layout.playlist_item, parent, false)
+        override fun getItemCount() = rows.size
+
+        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
+            val v = layoutInflater.inflate(R.layout.playlist_item, parent, false)
+            return VH(v)
+        }
+
+        @android.annotation.SuppressLint("ClickableViewAccessibility")
+        override fun onBindViewHolder(holder: VH, position: Int) {
             val row = rows[position]
-            val title = v.findViewById<TextView>(R.id.trackTitle)
-            val right = v.findViewById<TextView>(R.id.trackDur)
-            title.text = row.label
-            right.text = row.right
+            holder.title.text = row.label
+            holder.secondary.text = row.secondary
+            holder.right.text = row.right
             val color = skinColor(if (row.track == null) R.attr.skinAccent else R.attr.skinLcd)
-            title.setTextColor(color)
-            right.setTextColor(color)
-            v.setBackgroundColor(Color.TRANSPARENT)
-            return v
+            holder.title.setTextColor(color)
+            holder.secondary.setTextColor(color)
+            holder.right.setTextColor(color)
+            holder.itemView.setBackgroundColor(Color.TRANSPARENT)
+
+            val isLeaf = row.track != null
+            holder.handle.visibility = if (isLeaf) View.VISIBLE else View.INVISIBLE
+            holder.handle.setOnTouchListener { _, event ->
+                if (isLeaf && event.actionMasked == MotionEvent.ACTION_DOWN) itemTouchHelper.startDrag(holder)
+                false
+            }
+
+            holder.itemView.setOnClickListener {
+                val pos = holder.bindingAdapterPosition
+                val r = rows.getOrNull(pos) ?: return@setOnClickListener
+                if (r.track == null) {
+                    groupKey = r.label
+                    rebuild()
+                } else {
+                    val key = groupKey ?: return@setOnClickListener
+                    svc?.setQueue(currentDisplayedTracks(), key, pos, autoplay = true)
+                    finish()
+                }
+            }
+            holder.itemView.setOnLongClickListener {
+                val pos = holder.bindingAdapterPosition
+                val r = rows.getOrNull(pos)
+                if (r?.track != null) {
+                    val added = svc?.enqueue(listOf(r.track)) ?: 0
+                    flash(if (added > 0) "QUEUED: ${r.track.title}" else "ALREADY IN QUEUE")
+                }
+                true
+            }
         }
     }
 

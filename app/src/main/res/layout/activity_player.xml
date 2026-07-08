@@ -6,18 +6,6 @@
     android:background="?attr/skinBg"
     android:padding="10dp">
 
-    <!-- Slim control strip: just the menu button -->
-    <TextView
-        android:id="@+id/menuBtn"
-        android:layout_width="44dp"
-        android:layout_height="30dp"
-        android:background="@drawable/wa_button"
-        android:gravity="center"
-        android:text="≡"
-        android:textColor="?attr/skinAccent"
-        android:textStyle="bold"
-        android:textSize="17sp" />
-
     <!-- Download status strip (visible while downloading; tap to open GET SONGS) -->
     <LinearLayout
         android:id="@+id/dlStrip"
@@ -111,16 +99,33 @@
             android:textSize="13sp"
             android:fontFamily="monospace" />
 
-        <!-- kbps / kHz / channels readouts -->
+        <!-- kbps / kHz / channels readouts + menu button -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
-            android:orientation="horizontal">
+            android:orientation="horizontal"
+            android:gravity="center_vertical">
 
             <TextView android:id="@+id/kbpsText" style="@style/WaLcdChip" android:text="--- kbps" />
             <TextView android:id="@+id/khzText" style="@style/WaLcdChip" android:layout_marginStart="6dp" android:text="-- kHz" />
             <TextView android:id="@+id/chanText" style="@style/WaLcdChip" android:layout_marginStart="6dp" android:text="------" />
+
+            <View
+                android:layout_width="0dp"
+                android:layout_height="1dp"
+                android:layout_weight="1" />
+
+            <TextView
+                android:id="@+id/menuBtn"
+                android:layout_width="40dp"
+                android:layout_height="26dp"
+                android:background="@drawable/wa_button"
+                android:gravity="center"
+                android:text="≡"
+                android:textColor="?attr/skinAccent"
+                android:textStyle="bold"
+                android:textSize="15sp" />
         </LinearLayout>
 
         <!-- Position bar -->
@@ -237,13 +242,14 @@
                 android:fontFamily="monospace" />
         </LinearLayout>
 
-        <ListView
+        <include layout="@layout/queue_header" />
+
+        <androidx.recyclerview.widget.RecyclerView
             android:id="@+id/playlistView"
             android:layout_width="match_parent"
             android:layout_height="0dp"
             android:layout_weight="1"
             android:background="@drawable/lcd_sunken"
-            android:divider="@null"
             android:padding="4dp" />
     </LinearLayout>
 </LinearLayout>

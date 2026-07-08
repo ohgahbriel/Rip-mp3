@@ -9,7 +9,7 @@
     android:paddingTop="4dp"
     android:paddingBottom="4dp">
 
-    <!-- Drag handle: only visible/active on track-level rows -->
+    <!-- Drag handle: press-and-drag to reorder -->
     <TextView
         android:id="@+id/dragHandle"
         android:layout_width="26dp"
@@ -18,6 +18,15 @@
         android:text="⠿"
         android:textColor="?attr/skinBevelLight"
         android:textSize="15sp" />
+
+    <TextView
+        android:id="@+id/trackNum"
+        android:layout_width="24dp"
+        android:layout_height="wrap_content"
+        android:gravity="start"
+        android:textColor="?attr/skinLcd"
+        android:textSize="12sp"
+        android:fontFamily="monospace" />
 
     <TextView
         android:id="@+id/trackTitle"
@@ -32,10 +41,10 @@
         android:fontFamily="monospace" />
 
     <TextView
-        android:id="@+id/trackSecondary"
-        android:layout_width="96dp"
+        android:id="@+id/trackArtist"
+        android:layout_width="88dp"
         android:layout_height="wrap_content"
-        android:layout_marginStart="8dp"
+        android:layout_marginStart="6dp"
         android:singleLine="true"
         android:ellipsize="end"
         android:textColor="?attr/skinLcd"
@@ -44,9 +53,9 @@
 
     <TextView
         android:id="@+id/trackDur"
-        android:layout_width="44dp"
+        android:layout_width="40dp"
         android:layout_height="wrap_content"
-        android:layout_marginStart="8dp"
+        android:layout_marginStart="6dp"
         android:gravity="end"
         android:textColor="?attr/skinLcd"
         android:textSize="12sp"

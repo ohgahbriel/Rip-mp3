@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/browserHeader"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="horizontal"
+    android:paddingBottom="4dp"
+    android:visibility="gone">
+
+    <!-- Spacer matching drag handle column in playlist_item.xml -->
+    <View
+        android:layout_width="30dp"
+        android:layout_height="26dp" />
+
+    <TextView
+        android:id="@+id/hdrTitle"
+        style="@style/WaColHeader"
+        android:layout_width="0dp"
+        android:layout_weight="1"
+        android:layout_marginStart="4dp"
+        android:gravity="start|center_vertical"
+        android:text="TITLE" />
+
+    <TextView
+        android:id="@+id/hdrSecondary"
+        style="@style/WaColHeader"
+        android:layout_width="96dp"
+        android:layout_marginStart="8dp"
+        android:text="ALBUM" />
+
+    <TextView
+        android:id="@+id/hdrTime"
+        style="@style/WaColHeader"
+        android:layout_width="44dp"
+        android:layout_marginStart="8dp"
+        android:gravity="end|center_vertical"
+        android:text="TIME" />
+</LinearLayout>

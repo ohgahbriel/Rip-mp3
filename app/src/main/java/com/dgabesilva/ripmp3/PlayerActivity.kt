@@ -1,6 +1,7 @@
 package com.dgabesilva.ripmp3
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.app.Dialog
 import android.content.ComponentName
 import android.content.Context
@@ -19,15 +20,18 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
-import android.widget.BaseAdapter
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.PopupWindow
 import android.widget.SeekBar
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
+import androidx.recyclerview.widget.ItemTouchHelper
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
 import com.dgabesilva.ripmp3.databinding.ActivityPlayerBinding
 import kotlinx.coroutines.*
 import java.io.File
@@ -42,6 +46,33 @@ class PlayerActivity : AppCompatActivity(), DownloadEngine.Listener {
     private var svc: PlayerService? = null
     private var userSeeking = false
     private val density by lazy { resources.displayMetrics.density }
+
+    // ---------- Column sort ----------
+    private enum class SortField { TITLE, ARTIST, TIME }
+    private var sortField: SortField? = null
+    private var sortAsc = true
+
+    private val itemTouchHelper by lazy {
+        ItemTouchHelper(object : ItemTouchHelper.SimpleCallback(
+            ItemTouchHelper.UP or ItemTouchHelper.DOWN, 0
+        ) {
+            override fun onMove(
+                rv: RecyclerView, vh: RecyclerView.ViewHolder, target: RecyclerView.ViewHolder
+            ): Boolean {
+                val from = vh.bindingAdapterPosition
+                val to = target.bindingAdapterPosition
+                if (from == RecyclerView.NO_POSITION || to == RecyclerView.NO_POSITION) return false
+                svc?.moveTrack(from, to)
+                // A manual drag supersedes whatever column sort was active
+                sortField = null
+                updateSortHeader()
+                adapter.notifyItemMoved(from, to)
+                return true
+            }
+            override fun onSwiped(vh: RecyclerView.ViewHolder, direction: Int) {}
+            override fun isLongPressDragEnabled() = false // dragging only starts from the handle
+        })
+    }
 
     private val ticker = object : Runnable {
         override fun run() {
@@ -115,19 +146,14 @@ class PlayerActivity : AppCompatActivity(), DownloadEngine.Listener {
         DownloadEngine.init(this)
 
         adapter = PlaylistAdapter()
+        b.playlistView.layoutManager = LinearLayoutManager(this)
         b.playlistView.adapter = adapter
-        b.playlistView.setOnItemClickListener { _, _, pos, _ -> svc?.play(pos) }
-        b.playlistView.setOnItemLongClickListener { _, _, pos, _ ->
-            // Long-press removes a track from the queue (not from disk)
-            val s = svc ?: return@setOnItemLongClickListener true
-            if (pos in s.tracks.indices) {
-                val t = s.tracks[pos]
-                val list = s.tracks.toMutableList().also { it.removeAt(pos) }
-                s.setQueue(list, s.queueName)
-                flashMarquee("REMOVED: ${t.title}")
-            }
-            true
-        }
+        itemTouchHelper.attachToRecyclerView(b.playlistView)
+
+        b.hdrTitle.setOnClickListener { applySort(SortField.TITLE) }
+        b.hdrArtist.setOnClickListener { applySort(SortField.ARTIST) }
+        b.hdrTime.setOnClickListener { applySort(SortField.TIME) }
+        updateSortHeader()
 
         b.menuBtn.setOnClickListener { showMenu(it) }
         b.dlStrip.setOnClickListener { startActivity(Intent(this, DownloadActivity::class.java)) }
@@ -198,6 +224,28 @@ class PlayerActivity : AppCompatActivity(), DownloadEngine.Listener {
             b.posBar.max = maxOf(1, s.durationMs / 1000)
             scope.launch(Dispatchers.IO) { readAudioInfo(it.file) }
         } ?: serviceListener.onTracksReloaded()
+    }
+
+    private fun applySort(field: SortField) {
+        val s = svc ?: return
+        if (s.tracks.size < 2) return
+        sortAsc = if (sortField == field) !sortAsc else true
+        sortField = field
+        val cmp: Comparator<PlayerService.Track> = when (field) {
+            SortField.TITLE -> compareBy { it.title.lowercase(Locale.ROOT) }
+            SortField.ARTIST -> compareBy { it.artist.lowercase(Locale.ROOT) }
+            SortField.TIME -> compareBy { it.durationMs }
+        }
+        s.sortTracks(if (sortAsc) cmp else cmp.reversed())
+        updateSortHeader()
+    }
+
+    private fun updateSortHeader() {
+        fun label(base: String, field: SortField) =
+            if (sortField == field) "$base ${if (sortAsc) "▲" else "▼"}" else base
+        b.hdrTitle.text = label("TITLE", SortField.TITLE)
+        b.hdrArtist.text = label("ARTIST", SortField.ARTIST)
+        b.hdrTime.text = label("TIME", SortField.TIME)
     }
 
     private fun styleToggle(v: TextView, on: Boolean) {
@@ -454,26 +502,60 @@ class PlayerActivity : AppCompatActivity(), DownloadEngine.Listener {
 
     // ---------- Playlist adapter ----------
 
-    private inner class PlaylistAdapter : BaseAdapter() {
+    private inner class PlaylistAdapter : RecyclerView.Adapter<PlaylistAdapter.VH>() {
         private val list get() = svc?.tracks ?: emptyList<PlayerService.Track>()
-        override fun getCount() = list.size
-        override fun getItem(position: Int) = list[position]
-        override fun getItemId(position: Int) = position.toLong()
 
-        override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
-            val v = convertView ?: layoutInflater.inflate(R.layout.playlist_item, parent, false)
+        inner class VH(view: View) : RecyclerView.ViewHolder(view) {
+            val handle: TextView = view.findViewById(R.id.dragHandle)
+            val num: TextView = view.findViewById(R.id.trackNum)
+            val title: TextView = view.findViewById(R.id.trackTitle)
+            val artist: TextView = view.findViewById(R.id.trackArtist)
+            val dur: TextView = view.findViewById(R.id.trackDur)
+        }
+
+        override fun getItemCount() = list.size
+
+        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
+            val v = layoutInflater.inflate(R.layout.queue_item, parent, false)
+            return VH(v)
+        }
+
+        @SuppressLint("ClickableViewAccessibility")
+        override fun onBindViewHolder(holder: VH, position: Int) {
             val t = list[position]
-            val title = v.findViewById<TextView>(R.id.trackTitle)
-            val dur = v.findViewById<TextView>(R.id.trackDur)
             val flacTag = if (t.file.extension.equals("flac", true)) " [FLAC]" else ""
-            title.text = "${position + 1}. ${t.title}$flacTag"
-            dur.text = if (t.durationMs > 0) fmt(t.durationMs) else "-:--"
+            holder.num.text = "${position + 1}."
+            holder.title.text = "${t.title}$flacTag"
+            holder.artist.text = t.artist
+            holder.dur.text = if (t.durationMs > 0) fmt(t.durationMs) else "-:--"
             val isCurrent = position == (svc?.current ?: -1)
             val color = skinColor(if (isCurrent) R.attr.skinAccent else R.attr.skinLcd)
-            title.setTextColor(color)
-            dur.setTextColor(color)
-            v.setBackgroundColor(if (isCurrent) skinColor(R.attr.skinPanelDeep) else Color.TRANSPARENT)
-            return v
+            holder.num.setTextColor(color)
+            holder.title.setTextColor(color)
+            holder.artist.setTextColor(color)
+            holder.dur.setTextColor(color)
+            holder.itemView.setBackgroundColor(if (isCurrent) skinColor(R.attr.skinPanelDeep) else Color.TRANSPARENT)
+
+            holder.itemView.setOnClickListener {
+                val pos = holder.bindingAdapterPosition
+                if (pos != RecyclerView.NO_POSITION) svc?.play(pos)
+            }
+            holder.itemView.setOnLongClickListener {
+                // Long-press removes a track from the queue (not from disk)
+                val pos = holder.bindingAdapterPosition
+                val s = svc
+                if (s != null && pos in s.tracks.indices) {
+                    val t2 = s.tracks[pos]
+                    val newList = s.tracks.toMutableList().also { it.removeAt(pos) }
+                    s.setQueue(newList, s.queueName)
+                    flashMarquee("REMOVED: ${t2.title}")
+                }
+                true
+            }
+            holder.handle.setOnTouchListener { _, event ->
+                if (event.actionMasked == MotionEvent.ACTION_DOWN) itemTouchHelper.startDrag(holder)
+                false
+            }
         }
     }
 
