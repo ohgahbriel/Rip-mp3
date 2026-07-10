@@ -304,6 +304,14 @@ class PlayerActivity : AppCompatActivity(), DownloadEngine.Listener {
         sep()
         item("◨ SKINS") { skinsDialog() }
         item("⟳ RESCAN LIBRARY") { svc?.loadTracks(); flashMarquee("RESCANNING…") }
+        item("🧹 CLEAN UP TITLES") {
+            if (DownloadEngine.isDownloading) {
+                flashMarquee("BUSY — WAIT FOR THE CURRENT DOWNLOAD/CLEANUP TO FINISH")
+            } else {
+                flashMarquee("CLEANING UP TITLES…")
+                DownloadEngine.cleanupLibrary(this)
+            }
+        }
 
         popup.showAsDropDown(anchor, 0, (4 * density).toInt())
     }

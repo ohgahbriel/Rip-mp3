@@ -75,10 +75,26 @@ object DownloadEngine {
 
         job = scope.launch {
             try {
+                // Real YouTube titles are frequently junk for our purposes —
+                // "Artist - Song (Official Music Video) [HD]" — and plain
+                // video uploads carry NO native artist/genre/album metadata
+                // at all (verified against yt-dlp directly, including on
+                // prominent VEVO-distributed videos: every one of those
+                // fields comes back empty). So: strip the known-junk
+                // bracket/paren groups from the title, then try to split
+                // what's left into Artist/Title on a dash. The output
+                // template's %(a,b,c)s syntax picks the first non-empty
+                // field, so if a video DOES carry native artist/track data
+                // (rare, but happens for Content-ID-recognized music) that
+                // wins; our regex-derived split is only the fallback, and
+                // uploader/channel is the last resort after that.
+                val jobStartMs = System.currentTimeMillis()
+                val artistField = "%(artist,meta_artist,uploader,channel)s"
+                val titleField = "%(track,meta_track,title)s"
                 val outTemplate = if (isPlaylist)
-                    "${outDir.absolutePath}/%(playlist_title)s/%(playlist_index)02d - %(title)s.%(ext)s"
+                    "${outDir.absolutePath}/%(playlist_title)s/%(playlist_index)02d - $artistField - $titleField.%(ext)s"
                 else
-                    "${outDir.absolutePath}/%(title)s.%(ext)s"
+                    "${outDir.absolutePath}/$artistField - $titleField.%(ext)s"
 
                 val request = YoutubeDLRequest(url).apply {
                     addOption("-x")
@@ -91,6 +107,26 @@ object DownloadEngine {
                     addOption("--ignore-errors")
                     addOption("--download-archive", File(app.filesDir, "mp3archive.txt").absolutePath)
                     addOption("--add-metadata")
+                    // --replace-in-metadata and --parse-metadata are both
+                    // applied strictly in CLI order (verified directly
+                    // against yt-dlp — reversing them leaves the junk
+                    // phrases baked into the split-out title instead of
+                    // stripped first). --replace-in-metadata also takes 3
+                    // space-separated args (FIELDS REGEX REPLACE), which
+                    // addOption's single flag+value form can't express. So
+                    // ALL of these go through addCommands, in this order,
+                    // rather than mixing addOption/addCommands and letting
+                    // YoutubeDLRequest's own list-concatenation order
+                    // (every addOption first, then all addCommands)
+                    // silently reorder them.
+                    addCommands(listOf(
+                        "--replace-in-metadata", "title",
+                        "(?i)[\\(\\[][^\\)\\]]*\\b(official\\s*(music\\s*)?video|official\\s*audio|official\\s*lyric\\s*video|lyric\\s*video|lyrics?|audio\\s*only|visualizer|hd|hq|4k)\\b[^\\)\\]]*[\\)\\]]",
+                        ""
+                    ))
+                    addCommands(listOf("--replace-in-metadata", "title", "\\s{2,}", " "))
+                    addCommands(listOf("--replace-in-metadata", "title", "^\\s+|\\s+$", ""))
+                    addCommands(listOf("--parse-metadata", "title:(?P<meta_artist>.+?)\\s*[-–—]\\s*(?P<meta_track>.+)"))
                     addOption("-o", outTemplate)
                 }
 
@@ -113,6 +149,26 @@ object DownloadEngine {
                     }
                 }
 
+                // Genre pass: yt-dlp's own metadata cleanup (above) already gives
+                // fresh downloads a clean "Artist - Title" name and embeds
+                // whatever native artist/track data existed, but genre is never
+                // available from YouTube itself — this looks it up separately
+                // and writes it in. Scoped to files this job actually produced
+                // (mtime since the job started, with a little slack for clock
+                // skew) so a cleanup pass never touches unrelated library files.
+                val freshFiles = outDir.walkTopDown()
+                    .filter { it.isFile && it.lastModified() >= jobStartMs - 2000 &&
+                        (it.extension.equals("mp3", true) || it.extension.equals("flac", true)) }
+                    .toList()
+                if (freshFiles.isNotEmpty()) {
+                    post(Status("Tagging…", 100, running = true))
+                    for (f in freshFiles) {
+                        val (artist, title) = TagCleaner.splitArtistTitle(f.nameWithoutExtension)
+                        val genre = if (artist != null) TagCleaner.lookupGenre(artist, title) else null
+                        if (genre != null) TagCleaner.retagAndRename(app, f, artist, title, genre)
+                    }
+                }
+
                 // Make files visible to other music apps (including playlist subfolders)
                 outDir.walkTopDown().filter { it.isFile }.forEach {
                     MediaScannerConnection.scanFile(app, arrayOf(it.absolutePath), null, null)
@@ -125,6 +181,43 @@ object DownloadEngine {
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
                 post(Status("Error: ${e.message}", -1, running = false, error = true))
+            }
+        }
+    }
+
+    /**
+     * Retroactive cleanup for songs downloaded before the metadata pipeline
+     * in [start] existed — the messy "mp3rip - Artist: X Song: Y"-style names
+     * some yt-dlp extractions produced. Derives artist/title from each
+     * file's current name (there's no yt-dlp session to consult this time),
+     * looks up genre, and retags+renames in place. Reuses [start]'s Status/
+     * Listener broadcast so the existing download-progress UI (dlStrip in
+     * PlayerActivity) shows this too, with no new wiring needed there.
+     */
+    fun cleanupLibrary(context: Context) {
+        if (isDownloading) return
+        val app = context.applicationContext
+        val outDir = File(app.getExternalFilesDir(null), "MP3")
+        if (!outDir.isDirectory) {
+            post(Status("No downloads folder yet.", -1, running = false, error = true))
+            return
+        }
+        post(Status("Scanning library…", 0, running = true))
+        job = scope.launch {
+            try {
+                TagCleaner.cleanupLibrary(app, outDir) { ev ->
+                    if (ev.total > 0) {
+                        val pct = (ev.done * 100 / ev.total).coerceIn(0, 100)
+                        post(Status("Cleaning ${ev.done}/${ev.total} — ${ev.name}", pct, running = true))
+                    }
+                }
+                outDir.walkTopDown().filter { it.isFile }.forEach {
+                    MediaScannerConnection.scanFile(app, arrayOf(it.absolutePath), null, null)
+                }
+                post(Status("Done! Titles cleaned up.", 100, running = false, done = true))
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                post(Status("Cleanup error: ${e.message}", -1, running = false, error = true))
             }
         }
     }
