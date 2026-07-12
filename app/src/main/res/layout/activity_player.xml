@@ -204,6 +204,25 @@
         android:layout_marginTop="8dp"
         android:padding="8dp">
 
+        <EditText
+            android:id="@+id/searchInput"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="8dp"
+            android:background="@drawable/lcd_sunken"
+            android:hint="🔍 SEARCH QUEUE — TITLE OR ARTIST"
+            android:inputType="text"
+            android:imeOptions="actionSearch"
+            android:maxLines="1"
+            android:paddingLeft="10dp"
+            android:paddingRight="10dp"
+            android:paddingTop="8dp"
+            android:paddingBottom="8dp"
+            android:textColor="?attr/skinLcd"
+            android:textColorHint="?attr/skinBevelLight"
+            android:textSize="12sp"
+            android:fontFamily="monospace" />
+
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"

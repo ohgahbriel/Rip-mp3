@@ -149,13 +149,17 @@ object DownloadEngine {
                     }
                 }
 
-                // Genre pass: yt-dlp's own metadata cleanup (above) already gives
-                // fresh downloads a clean "Artist - Title" name and embeds
-                // whatever native artist/track data existed, but genre is never
-                // available from YouTube itself — this looks it up separately
-                // and writes it in. Scoped to files this job actually produced
-                // (mtime since the job started, with a little slack for clock
-                // skew) so a cleanup pass never touches unrelated library files.
+                // Genre + artwork pass: yt-dlp's own metadata cleanup (above)
+                // already gives fresh downloads a clean "Artist - Title" name
+                // and embeds whatever native artist/track data existed, but
+                // genre and cover art are never available from YouTube itself
+                // — this looks them up separately and writes them in. Always
+                // retags (not just when a genre/art match is found) so the
+                // embedded artist/title tags stay consistent with the
+                // filename even on a lookup miss. Scoped to files this job
+                // actually produced (mtime since the job started, with a
+                // little slack for clock skew) so this never touches
+                // unrelated library files.
                 val freshFiles = outDir.walkTopDown()
                     .filter { it.isFile && it.lastModified() >= jobStartMs - 2000 &&
                         (it.extension.equals("mp3", true) || it.extension.equals("flac", true)) }
@@ -164,8 +168,10 @@ object DownloadEngine {
                     post(Status("Tagging…", 100, running = true))
                     for (f in freshFiles) {
                         val (artist, title) = TagCleaner.splitArtistTitle(f.nameWithoutExtension)
-                        val genre = if (artist != null) TagCleaner.lookupGenre(artist, title) else null
-                        if (genre != null) TagCleaner.retagAndRename(app, f, artist, title, genre)
+                        val meta = if (artist != null) TagCleaner.lookupMetadata(artist, title)
+                                   else TagCleaner.LookupResult(null, null)
+                        val art = meta.artworkUrl?.let { TagCleaner.downloadArtwork(it) }
+                        TagCleaner.retagAndRename(app, f, artist, title, meta.genre, art)
                     }
                 }
 
@@ -205,7 +211,7 @@ object DownloadEngine {
         post(Status("Scanning library…", 0, running = true))
         job = scope.launch {
             try {
-                TagCleaner.cleanupLibrary(app, outDir) { ev ->
+                val result = TagCleaner.cleanupLibrary(app, outDir) { ev ->
                     if (ev.total > 0) {
                         val pct = (ev.done * 100 / ev.total).coerceIn(0, 100)
                         post(Status("Cleaning ${ev.done}/${ev.total} — ${ev.name}", pct, running = true))
@@ -214,7 +220,8 @@ object DownloadEngine {
                 outDir.walkTopDown().filter { it.isFile }.forEach {
                     MediaScannerConnection.scanFile(app, arrayOf(it.absolutePath), null, null)
                 }
-                post(Status("Done! Titles cleaned up.", 100, running = false, done = true))
+                val skippedNote = if (result.skipped > 0) " (${result.skipped} already clean)" else ""
+                post(Status("Done! Titles cleaned up.$skippedNote", 100, running = false, done = true))
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
                 post(Status("Cleanup error: ${e.message}", -1, running = false, error = true))

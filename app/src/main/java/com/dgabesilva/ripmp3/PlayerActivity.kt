@@ -47,6 +47,15 @@ class PlayerActivity : AppCompatActivity(), DownloadEngine.Listener {
     private var userSeeking = false
     private val density by lazy { resources.displayMetrics.density }
 
+    // ---------- Search filter ----------
+    // Filters the queue view only (title/artist substring match); the
+    // underlying queue itself is untouched. Manual drag-reorder is disabled
+    // while this is non-blank — dragging a row to a position among hidden
+    // (filtered-out) tracks has no unambiguous meaning, so rather than guess
+    // we just turn the handle off, same as most music apps do while search
+    // is active.
+    private var filterQuery: String = ""
+
     // ---------- Column sort ----------
     private enum class SortField { TITLE, ARTIST, TIME }
     private var sortField: SortField? = null
@@ -59,6 +68,13 @@ class PlayerActivity : AppCompatActivity(), DownloadEngine.Listener {
             override fun onMove(
                 rv: RecyclerView, vh: RecyclerView.ViewHolder, target: RecyclerView.ViewHolder
             ): Boolean {
+                // While a search filter is active, adapter positions no
+                // longer equal real queue indices (see PlaylistAdapter.list)
+                // — reordering is disabled for the duration rather than
+                // guessing what "move" means among hidden rows. The drag
+                // handle's touch listener already refuses to start a drag
+                // in this state; this is the defense-in-depth backstop.
+                if (filterQuery.isNotBlank()) return false
                 val from = vh.bindingAdapterPosition
                 val to = target.bindingAdapterPosition
                 if (from == RecyclerView.NO_POSITION || to == RecyclerView.NO_POSITION) return false
@@ -105,7 +121,7 @@ class PlayerActivity : AppCompatActivity(), DownloadEngine.Listener {
             adapter.notifyDataSetChanged()
             val s = svc ?: return
             b.plName.text = s.queueName
-            b.plCount.text = "${s.tracks.size} trk"
+            updatePlCount()
             if (s.tracks.isEmpty() && s.currentTrack == null)
                 b.marquee.text =
                     if (s.queueName == "LIBRARY") "NO TRACKS — TAP GET SONGS"
@@ -154,6 +170,16 @@ class PlayerActivity : AppCompatActivity(), DownloadEngine.Listener {
         b.queueHeader.hdrArtist.setOnClickListener { applySort(SortField.ARTIST) }
         b.queueHeader.hdrTime.setOnClickListener { applySort(SortField.TIME) }
         updateSortHeader()
+
+        b.searchInput.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                filterQuery = s?.toString() ?: ""
+                adapter.notifyDataSetChanged()
+                updatePlCount()
+            }
+            override fun afterTextChanged(s: android.text.Editable?) {}
+        })
 
         b.menuBtn.setOnClickListener { showMenu(it) }
         b.dlStrip.setOnClickListener { startActivity(Intent(this, DownloadActivity::class.java)) }
@@ -214,7 +240,7 @@ class PlayerActivity : AppCompatActivity(), DownloadEngine.Listener {
         val s = svc ?: return
         adapter.notifyDataSetChanged()
         b.plName.text = s.queueName
-        b.plCount.text = "${s.tracks.size} trk"
+        updatePlCount()
         b.volBar.progress = (s.volume * 100).toInt()
         styleToggle(b.btnShuffle, s.shuffle)
         styleToggle(b.btnRepeat, s.repeatAll)
@@ -238,6 +264,19 @@ class PlayerActivity : AppCompatActivity(), DownloadEngine.Listener {
         }
         s.sortTracks(if (sortAsc) cmp else cmp.reversed())
         updateSortHeader()
+    }
+
+    /** "12 trk", or "3/12 trk" while a search filter narrows the visible rows. */
+    private fun updatePlCount() {
+        val s = svc ?: return
+        val total = s.tracks.size
+        val shown = adapter.itemCount
+        b.plCount.text = if (filterQuery.isBlank() || shown == total) "$total trk" else "$shown/$total trk"
+    }
+
+    /** Clears the search box (and its filter) — called wherever the queue itself changes wholesale. */
+    private fun clearSearch() {
+        if (b.searchInput.text.isNotEmpty()) b.searchInput.text.clear()
     }
 
     private fun updateSortHeader() {
@@ -296,11 +335,12 @@ class PlayerActivity : AppCompatActivity(), DownloadEngine.Listener {
         item("⇩ GET SONGS") { startActivity(Intent(this, DownloadActivity::class.java)) }
         item("◫ BROWSER") { startActivity(Intent(this, BrowserActivity::class.java)) }
         sep()
-        item("＋ NEW PLAYLIST") { svc?.newQueue(); flashMarquee("NEW EMPTY LIST — ADD FROM BROWSER") }
+        item("＋ NEW PLAYLIST") { clearSearch(); svc?.newQueue(); flashMarquee("NEW EMPTY LIST — ADD FROM BROWSER") }
         item("💾 SAVE PLAYLIST") { savePlaylistDialog() }
         item("▤ LOAD PLAYLIST") { loadPlaylistDialog() }
         item("✕ DELETE PLAYLIST") { deletePlaylistDialog() }
-        item("♫ WHOLE LIBRARY") { svc?.resetToLibrary() }
+        item("♫ WHOLE LIBRARY") { clearSearch(); svc?.resetToLibrary() }
+        item("✎ EDIT TAGS") { editTagsDialog() }
         sep()
         item("◨ SKINS") { skinsDialog() }
         item("⟳ RESCAN LIBRARY") { svc?.loadTracks(); flashMarquee("RESCANNING…") }
@@ -419,6 +459,7 @@ class PlayerActivity : AppCompatActivity(), DownloadEngine.Listener {
         val names = PlaylistStore.list(this)
         waListDialog("LOAD PLAYLIST", names, "NO SAVED PLAYLISTS YET") { i ->
             val s = svc ?: return@waListDialog
+            clearSearch()
             val byPath = s.library.associateBy { it.file.absolutePath }
             val loaded = PlaylistStore.load(this, names[i]).map { f ->
                 byPath[f.absolutePath] ?: PlayerService.Track(f, f.nameWithoutExtension)
@@ -442,6 +483,78 @@ class PlayerActivity : AppCompatActivity(), DownloadEngine.Listener {
                 Skin.set(this, i)
                 recreate()
             }
+        }
+    }
+
+    /**
+     * Manual fix for the cases the automated pipeline (DownloadEngine +
+     * TagCleaner) doesn't get right — an obscure track the iTunes lookup
+     * can't find, or a title it split wrong. Operates on the currently
+     * playing track; genre starts blank rather than prefilled since Track
+     * doesn't carry a genre field (would need a separate MediaStore genre
+     * query to read it back, not worth it just to pre-fill a rarely-edited
+     * field — leaving it blank is a fine default and typing over a wrong
+     * guess isn't meaningfully different from typing into an empty box).
+     */
+    private fun editTagsDialog() {
+        val t = svc?.currentTrack ?: run { flashMarquee("NOTHING PLAYING TO EDIT"); return }
+        waDialog("EDIT TAGS") { root, dialog ->
+            fun field(label: String, value: String, hint: String): EditText {
+                root.addView(TextView(this).apply {
+                    text = label
+                    setTextColor(skinColor(R.attr.skinText))
+                    textSize = 10f
+                    typeface = Typeface.MONOSPACE
+                    letterSpacing = 0.1f
+                    setPadding(0, (8 * density).toInt(), 0, (3 * density).toInt())
+                })
+                val input = EditText(this).apply {
+                    setText(value)
+                    this.hint = hint
+                    setTextColor(skinColor(R.attr.skinLcd))
+                    setHintTextColor(skinColor(R.attr.skinBevelLight))
+                    textSize = 13f
+                    typeface = Typeface.MONOSPACE
+                    background = getDrawable(R.drawable.lcd_sunken)
+                    setPadding((10 * density).toInt(), (9 * density).toInt(), (10 * density).toInt(), (9 * density).toInt())
+                }
+                root.addView(input)
+                return input
+            }
+            val titleInput = field("TITLE", t.title, "song title")
+            val artistInput = field("ARTIST", t.artist, "artist")
+            val genreInput = field("GENRE", "", "e.g. Rock")
+
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(0, (10 * density).toInt(), 0, 0)
+            }
+            fun btn(label: String, action: () -> Unit) = TextView(this).apply {
+                text = label
+                gravity = Gravity.CENTER
+                setTextColor(skinColor(R.attr.skinAccent))
+                textSize = 12f
+                typeface = Typeface.MONOSPACE
+                setTypeface(typeface, Typeface.BOLD)
+                background = getDrawable(R.drawable.wa_button)
+                layoutParams = LinearLayout.LayoutParams(0, (38 * density).toInt(), 1f)
+                    .apply { marginEnd = (4 * density).toInt() }
+                setOnClickListener { action() }
+            }
+            row.addView(btn("SAVE") {
+                val newTitle = titleInput.text.toString().trim().ifBlank { t.title }
+                val newArtist = artistInput.text.toString().trim().ifBlank { null }
+                val newGenre = genreInput.text.toString().trim().ifBlank { null }
+                dialog.dismiss()
+                flashMarquee("SAVING TAGS…")
+                scope.launch {
+                    TagCleaner.retagAndRename(this@PlayerActivity, t.file, newArtist, newTitle, newGenre)
+                    svc?.loadTracks()
+                    flashMarquee("TAGS UPDATED")
+                }
+            })
+            row.addView(btn("CANCEL") { dialog.dismiss() })
+            root.addView(row)
         }
     }
 
@@ -511,7 +624,21 @@ class PlayerActivity : AppCompatActivity(), DownloadEngine.Listener {
     // ---------- Playlist adapter ----------
 
     private inner class PlaylistAdapter : RecyclerView.Adapter<PlaylistAdapter.VH>() {
-        private val list get() = svc?.tracks ?: emptyList<PlayerService.Track>()
+        // Pairs each visible row with its REAL index in svc.tracks. When
+        // unfiltered this is just 0..n-1 in order (adapter position ==
+        // real index, same as before); while searching it's the matching
+        // subset, so play/remove/numbering must resolve through .index
+        // rather than trusting the adapter position directly — that's the
+        // whole reason this is IndexedValue and not a plain List<Track>.
+        private val list: List<IndexedValue<PlayerService.Track>>
+            get() {
+                val all = svc?.tracks ?: emptyList()
+                val q = filterQuery.trim()
+                if (q.isEmpty()) return all.withIndex().toList()
+                return all.withIndex().filter { (_, t) ->
+                    t.title.contains(q, ignoreCase = true) || t.artist.contains(q, ignoreCase = true)
+                }
+            }
 
         inner class VH(view: View) : RecyclerView.ViewHolder(view) {
             val handle: TextView = view.findViewById(R.id.dragHandle)
@@ -530,13 +657,13 @@ class PlayerActivity : AppCompatActivity(), DownloadEngine.Listener {
 
         @SuppressLint("ClickableViewAccessibility")
         override fun onBindViewHolder(holder: VH, position: Int) {
-            val t = list[position]
+            val (realIndex, t) = list[position]
             val flacTag = if (t.file.extension.equals("flac", true)) " [FLAC]" else ""
-            holder.num.text = "${position + 1}."
+            holder.num.text = "${realIndex + 1}."
             holder.title.text = "${t.title}$flacTag"
             holder.artist.text = t.artist
             holder.dur.text = if (t.durationMs > 0) fmt(t.durationMs) else "-:--"
-            val isCurrent = position == (svc?.current ?: -1)
+            val isCurrent = realIndex == (svc?.current ?: -1)
             val color = skinColor(if (isCurrent) R.attr.skinAccent else R.attr.skinLcd)
             holder.num.setTextColor(color)
             holder.title.setTextColor(color)
@@ -546,22 +673,30 @@ class PlayerActivity : AppCompatActivity(), DownloadEngine.Listener {
 
             holder.itemView.setOnClickListener {
                 val pos = holder.bindingAdapterPosition
-                if (pos != RecyclerView.NO_POSITION) svc?.play(pos)
+                if (pos != RecyclerView.NO_POSITION) svc?.play(list[pos].index)
             }
             holder.itemView.setOnLongClickListener {
                 // Long-press removes a track from the queue (not from disk)
                 val pos = holder.bindingAdapterPosition
                 val s = svc
-                if (s != null && pos in s.tracks.indices) {
-                    val t2 = s.tracks[pos]
-                    val newList = s.tracks.toMutableList().also { it.removeAt(pos) }
-                    s.setQueue(newList, s.queueName)
-                    flashMarquee("REMOVED: ${t2.title}")
+                if (s != null && pos != RecyclerView.NO_POSITION) {
+                    val realIdx = list[pos].index
+                    if (realIdx in s.tracks.indices) {
+                        val t2 = s.tracks[realIdx]
+                        val newList = s.tracks.toMutableList().also { it.removeAt(realIdx) }
+                        s.setQueue(newList, s.queueName)
+                        flashMarquee("REMOVED: ${t2.title}")
+                    }
                 }
                 true
             }
+            // Dragging only makes unambiguous sense against the real,
+            // unfiltered order — dimmed and inert while a search is active.
+            holder.handle.alpha = if (filterQuery.isBlank()) 1f else 0.3f
             holder.handle.setOnTouchListener { _, event ->
-                if (event.actionMasked == MotionEvent.ACTION_DOWN) itemTouchHelper.startDrag(holder)
+                if (filterQuery.isBlank() && event.actionMasked == MotionEvent.ACTION_DOWN) {
+                    itemTouchHelper.startDrag(holder)
+                }
                 false
             }
         }

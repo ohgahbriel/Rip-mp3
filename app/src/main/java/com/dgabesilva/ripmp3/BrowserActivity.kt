@@ -35,7 +35,17 @@ class BrowserActivity : AppCompatActivity() {
     private var mode = Mode.ARTISTS
     private var groupKey: String? = null   // null = group list, else that group's tracks
     private var groups = linkedMapOf<String, List<PlayerService.Track>>()
+    // allRows is the authoritative, unfiltered list rebuild() produces;
+    // rows is what the adapter actually shows and — critically — what the
+    // drag handler mutates directly to persist custom order (saveCustomOrder
+    // reads straight from `rows`). That mutation-as-source-of-truth only
+    // stays correct when rows == allRows, i.e. no filter active, which is
+    // exactly when dragging is allowed (see itemTouchHelper below) — a
+    // filtered subset has no unambiguous "reorder" meaning, same reasoning
+    // as PlayerActivity's queue search.
+    private var allRows = listOf<Row>()
     private var rows = listOf<Row>()
+    private var filterQuery: String = ""
     private lateinit var adapter: RowAdapter
 
     private data class Row(val label: String, val secondary: String, val right: String, val track: PlayerService.Track?)
@@ -49,8 +59,9 @@ class BrowserActivity : AppCompatActivity() {
     private val itemTouchHelper by lazy {
         ItemTouchHelper(object : ItemTouchHelper.SimpleCallback(0, 0) {
             override fun getMovementFlags(rv: RecyclerView, vh: RecyclerView.ViewHolder): Int {
-                // Only track-level rows (inside an open group) can be dragged
-                if (groupKey == null) return 0
+                // Only track-level rows (inside an open group) can be dragged,
+                // and only when unfiltered — see the `rows`/`allRows` comment above.
+                if (groupKey == null || filterQuery.isNotBlank()) return 0
                 return makeMovementFlags(ItemTouchHelper.UP or ItemTouchHelper.DOWN, 0)
             }
             override fun onMove(rv: RecyclerView, vh: RecyclerView.ViewHolder, target: RecyclerView.ViewHolder): Boolean {
@@ -131,6 +142,15 @@ class BrowserActivity : AppCompatActivity() {
         b.browserHeader.hdrSecondary.setOnClickListener { applySort(SortField.SECONDARY) }
         b.browserHeader.hdrTime.setOnClickListener { applySort(SortField.TIME) }
 
+        b.searchInput.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                filterQuery = s?.toString() ?: ""
+                applyFilter()
+            }
+            override fun afterTextChanged(s: android.text.Editable?) {}
+        })
+
         b.playAllBtn.setOnClickListener {
             val key = groupKey ?: return@setOnClickListener
             val list = currentDisplayedTracks()
@@ -147,7 +167,7 @@ class BrowserActivity : AppCompatActivity() {
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                if (groupKey != null) { groupKey = null; rebuild() } else finish()
+                if (groupKey != null) { groupKey = null; clearSearch(); rebuild() } else finish()
             }
         })
 
@@ -158,7 +178,19 @@ class BrowserActivity : AppCompatActivity() {
         mode = m
         groupKey = null
         sortField = null
+        clearSearch()
         rebuild()
+    }
+
+    private fun clearSearch() {
+        if (b.searchInput.text.isNotEmpty()) b.searchInput.text.clear()
+    }
+
+    private fun applyFilter() {
+        val q = filterQuery.trim()
+        rows = if (q.isEmpty()) allRows
+               else allRows.filter { r -> r.label.contains(q, ignoreCase = true) || r.secondary.contains(q, ignoreCase = true) }
+        adapter.notifyDataSetChanged()
     }
 
     private fun applySort(field: SortField) {
@@ -207,7 +239,7 @@ class BrowserActivity : AppCompatActivity() {
 
         val key = groupKey
         if (key == null) {
-            rows = groups.map { (name, list) -> Row(name, "", "${list.size} trk ▸", null) }
+            allRows = groups.map { (name, list) -> Row(name, "", "${list.size} trk ▸", null) }
             b.crumb.text = if (mode == Mode.ARTISTS) "ALL ARTISTS (${groups.size})" else "ALL ALBUMS (${groups.size})"
             b.actionRow.visibility = View.GONE
             b.browserHeader.root.visibility = View.GONE
@@ -215,7 +247,7 @@ class BrowserActivity : AppCompatActivity() {
             val base = groups[key] ?: emptyList()
             val ordered = applyCustomOrder(key, base)
             val list = sortedTracks(ordered)
-            rows = list.map {
+            allRows = list.map {
                 val secondary = if (mode == Mode.ARTISTS) it.album else it.artist
                 Row(it.title, secondary, fmt(it.durationMs), it)
             }
@@ -224,7 +256,7 @@ class BrowserActivity : AppCompatActivity() {
             b.browserHeader.root.visibility = View.VISIBLE
             updateSortHeader()
         }
-        adapter.notifyDataSetChanged()
+        applyFilter()
     }
 
     private fun styleTab(v: TextView, on: Boolean) {
@@ -272,8 +304,11 @@ class BrowserActivity : AppCompatActivity() {
 
             val isLeaf = row.track != null
             holder.handle.visibility = if (isLeaf) View.VISIBLE else View.INVISIBLE
+            holder.handle.alpha = if (filterQuery.isBlank()) 1f else 0.3f
             holder.handle.setOnTouchListener { _, event ->
-                if (isLeaf && event.actionMasked == MotionEvent.ACTION_DOWN) itemTouchHelper.startDrag(holder)
+                if (isLeaf && filterQuery.isBlank() && event.actionMasked == MotionEvent.ACTION_DOWN) {
+                    itemTouchHelper.startDrag(holder)
+                }
                 false
             }
 
@@ -282,6 +317,7 @@ class BrowserActivity : AppCompatActivity() {
                 val r = rows.getOrNull(pos) ?: return@setOnClickListener
                 if (r.track == null) {
                     groupKey = r.label
+                    clearSearch()
                     rebuild()
                 } else {
                     val key = groupKey ?: return@setOnClickListener
