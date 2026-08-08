@@ -16,7 +16,10 @@ Every push to this repo automatically builds the APK via GitHub Actions:
 - **Winamp-style player is the home screen** — LCD deck, spectrum analyzer, marquee title, playlist editor, shuffle/repeat; every screen wears the same chrome
 - **3 skins** — CLASSIC GREEN, ICE BLUE, HELLFIRE (≡ menu → SKINS); spectrum analyzer recolors to match
 - **Playlist system** — ≡ menu: new / save / load / delete playlists, stored as standard `.m3u` files; long-press a track to remove it from the queue
-- **Library browser** — browse every song by ARTIST or ALBUM; tap to play, ▶ PLAY ALL a group, ＋ QUEUE it into the current playlist, hold a track to queue just that one
+- **Library browser** — browse every song by ARTIST, ALBUM, GENRE, or a flat **SONGS** list; tap to play, ▶ PLAY ALL a group, ＋ QUEUE it into the current playlist, **hold a track for a menu** (play / edit tags & rename / queue / select)
+- **Search everything** — the SONGS tab searches your whole library, and every search box is accent-insensitive and multi-word ("metallica pup" finds *Master of Puppets*, "sao" finds *São*)
+- **Rename any track, anywhere** — long-press a song in the queue or browser → **Edit tags / rename** (not just the playing one); the sheet pre-fills the existing genre and pre-splits an "Artist - Title" filename into fields. The filename follows the tags
+- **Batch rename** — in the browser, ☑ SELECT multiple tracks (or ALL) → **find & replace** across their titles/artists and optionally set a genre in one pass; `CLEAN UP TITLES` still does the automatic pass
 - **Finds all songs on your phone** — scans the Android media library (with your permission) and merges it below your downloads; plays MP3, FLAC, M4A, OGG and anything else Android supports
 - **GET SONGS** button opens the download screen; paste a URL, or **share directly from the YouTube app** (Share → RIP MP3)
 - **Downloads run in the background** — start a download, go back to the player and listen while it finishes (live status strip on the player)

@@ -210,7 +210,7 @@
             android:layout_height="wrap_content"
             android:layout_marginBottom="8dp"
             android:background="@drawable/lcd_sunken"
-            android:hint="🔍 SEARCH QUEUE — TITLE OR ARTIST"
+            android:hint="🔍 SEARCH LIST — TITLE OR ARTIST"
             android:inputType="text"
             android:imeOptions="actionSearch"
             android:maxLines="1"

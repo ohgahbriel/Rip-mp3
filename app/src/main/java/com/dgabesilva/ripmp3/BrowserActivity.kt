@@ -3,15 +3,23 @@ package com.dgabesilva.ripmp3
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.app.Dialog
 import android.content.ServiceConnection
 import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.ColorDrawable
+import android.media.MediaScannerConnection
 import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.widget.EditText
+import android.widget.LinearLayout
+import android.widget.PopupWindow
 import android.widget.TextView
 import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
@@ -19,6 +27,11 @@ import androidx.recyclerview.widget.ItemTouchHelper
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.dgabesilva.ripmp3.databinding.ActivityBrowserBinding
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import java.util.Locale
 
 /**
@@ -27,10 +40,12 @@ import java.util.Locale
  */
 class BrowserActivity : AppCompatActivity() {
 
-    private enum class Mode { ARTISTS, ALBUMS }
+    private enum class Mode { ARTISTS, ALBUMS, SONGS, GENRE }
 
     private lateinit var b: ActivityBrowserBinding
     private val ui = Handler(Looper.getMainLooper())
+    private val density by lazy { resources.displayMetrics.density }
+    private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var svc: PlayerService? = null
     private var mode = Mode.ARTISTS
     private var groupKey: String? = null   // null = group list, else that group's tracks
@@ -47,6 +62,13 @@ class BrowserActivity : AppCompatActivity() {
     private var rows = listOf<Row>()
     private var filterQuery: String = ""
     private lateinit var adapter: RowAdapter
+
+    // ---------- Multi-select (batch rename) ----------
+    // Off by default; toggled on from a track's long-press menu or the SELECT
+    // button. Tracks are held by file path (stable across the rescans a rename
+    // triggers) rather than by Track identity.
+    private var selectMode = false
+    private val selected = linkedSetOf<String>()
 
     private data class Row(val label: String, val secondary: String, val right: String, val track: PlayerService.Track?)
 
@@ -137,6 +159,16 @@ class BrowserActivity : AppCompatActivity() {
         b.closeBtn.setOnClickListener { finish() }
         b.tabArtists.setOnClickListener { switchMode(Mode.ARTISTS) }
         b.tabAlbums.setOnClickListener { switchMode(Mode.ALBUMS) }
+        b.tabSongs.setOnClickListener { switchMode(Mode.SONGS) }
+        b.tabGenre.setOnClickListener { switchMode(Mode.GENRE) }
+
+        b.selectBtn.setOnClickListener { enterSelectMode(null) }
+        b.selAllBtn.setOnClickListener {
+            currentDisplayedTracks().forEach { selected += it.file.absolutePath }
+            updateSelBar(); adapter.notifyDataSetChanged()
+        }
+        b.renameBtn.setOnClickListener { batchRenameDialog() }
+        b.selDoneBtn.setOnClickListener { exitSelectMode() }
 
         b.browserHeader.hdrTitle.setOnClickListener { applySort(SortField.TITLE) }
         b.browserHeader.hdrSecondary.setOnClickListener { applySort(SortField.SECONDARY) }
@@ -152,7 +184,7 @@ class BrowserActivity : AppCompatActivity() {
         })
 
         b.playAllBtn.setOnClickListener {
-            val key = groupKey ?: return@setOnClickListener
+            val key = trackListKey() ?: return@setOnClickListener
             val list = currentDisplayedTracks()
             if (list.isEmpty()) return@setOnClickListener
             svc?.setQueue(list, key, 0, autoplay = true)
@@ -167,7 +199,11 @@ class BrowserActivity : AppCompatActivity() {
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                if (groupKey != null) { groupKey = null; clearSearch(); rebuild() } else finish()
+                when {
+                    selectMode -> exitSelectMode()
+                    groupKey != null -> { groupKey = null; clearSearch(); rebuild() }
+                    else -> finish()
+                }
             }
         })
 
@@ -175,6 +211,7 @@ class BrowserActivity : AppCompatActivity() {
     }
 
     private fun switchMode(m: Mode) {
+        if (selectMode) exitSelectMode(rebuild = false)
         mode = m
         groupKey = null
         sortField = null
@@ -182,19 +219,58 @@ class BrowserActivity : AppCompatActivity() {
         rebuild()
     }
 
+    // ---------- Multi-select mode ----------
+
+    /** Enters batch-select mode, optionally pre-selecting [preselect]. Only usable inside a track list. */
+    private fun enterSelectMode(preselect: PlayerService.Track?) {
+        if (trackListKey() == null) { flash("OPEN A LIST OR SONGS TAB FIRST"); return }
+        selectMode = true
+        preselect?.let { selected += it.file.absolutePath }
+        b.selectBar.visibility = View.VISIBLE
+        updateSelBar()
+        adapter.notifyDataSetChanged()
+    }
+
+    private fun exitSelectMode(rebuild: Boolean = true) {
+        selectMode = false
+        selected.clear()
+        b.selectBar.visibility = View.GONE
+        if (rebuild) adapter.notifyDataSetChanged()
+    }
+
+    private fun toggleSelection(track: PlayerService.Track) {
+        val path = track.file.absolutePath
+        if (!selected.remove(path)) selected += path
+        updateSelBar()
+    }
+
+    private fun updateSelBar() {
+        b.selCount.text = "${selected.size} SELECTED"
+    }
+
     private fun clearSearch() {
         if (b.searchInput.text.isNotEmpty()) b.searchInput.text.clear()
     }
 
+    /** The name to stamp on a queue built from what's on screen: the open group, or "ALL SONGS" for the flat tab. */
+    private fun trackListKey(): String? = if (mode == Mode.SONGS) "ALL SONGS" else groupKey
+
+    /** The value a track groups under in the current tab (SONGS never groups). */
+    private fun groupValueOf(t: PlayerService.Track): String = when (mode) {
+        Mode.ARTISTS -> t.artist.ifBlank { "Unknown Artist" }
+        Mode.ALBUMS -> t.album.ifBlank { "Unknown Album" }
+        Mode.GENRE -> t.genre.ifBlank { "Unknown Genre" }
+        Mode.SONGS -> ""
+    }
+
     private fun applyFilter() {
-        val q = filterQuery.trim()
-        rows = if (q.isEmpty()) allRows
-               else allRows.filter { r -> r.label.contains(q, ignoreCase = true) || r.secondary.contains(q, ignoreCase = true) }
+        rows = allRows.filter { r -> Search.matches(filterQuery, r.label, r.secondary) }
         adapter.notifyDataSetChanged()
     }
 
     private fun applySort(field: SortField) {
-        if ((groups[groupKey] ?: emptyList()).size < 2) return
+        val count = if (mode == Mode.SONGS) (svc?.library?.size ?: 0) else (groups[groupKey] ?: emptyList()).size
+        if (count < 2) return
         sortAsc = if (sortField == field) !sortAsc else true
         sortField = field
         rebuild()
@@ -224,23 +300,43 @@ class BrowserActivity : AppCompatActivity() {
 
     private fun rebuild() {
         val lib = svc?.library ?: emptyList()
-        groups = lib.groupBy {
-            if (mode == Mode.ARTISTS) it.artist.ifBlank { "Unknown Artist" }
-            else it.album.ifBlank { "Unknown Album" }
-        }.toSortedMap(compareBy { it.lowercase(Locale.ROOT) })
+
+        styleTab(b.tabArtists, mode == Mode.ARTISTS)
+        styleTab(b.tabAlbums, mode == Mode.ALBUMS)
+        styleTab(b.tabSongs, mode == Mode.SONGS)
+        styleTab(b.tabGenre, mode == Mode.GENRE)
+
+        // SONGS: one flat, searchable, sortable list of the whole library —
+        // no group level, so it short-circuits the artist/album grouping
+        // entirely. This is the "search everything and play any track" view.
+        if (mode == Mode.SONGS) {
+            groups = linkedMapOf()
+            val list = sortedTracks(lib.sortedBy { it.title.lowercase(Locale.ROOT) })
+            allRows = list.map { Row(it.title, it.artist, fmt(it.durationMs), it) }
+            b.crumb.text = "ALL SONGS (${list.size})"
+            b.actionRow.visibility = View.VISIBLE
+            b.browserHeader.root.visibility = View.VISIBLE
+            updateSortHeader()
+            applyFilter()
+            return
+        }
+
+        groups = lib.groupBy { groupValueOf(it) }
+            .toSortedMap(compareBy { it.lowercase(Locale.ROOT) })
             .mapValues { (_, v) -> v.sortedBy { it.title.lowercase(Locale.ROOT) } }
             .toMutableMap() as LinkedHashMap<String, List<PlayerService.Track>>
 
         // Selected group may have vanished after a rescan
         if (groupKey != null && groupKey !in groups) groupKey = null
 
-        styleTab(b.tabArtists, mode == Mode.ARTISTS)
-        styleTab(b.tabAlbums, mode == Mode.ALBUMS)
-
         val key = groupKey
         if (key == null) {
             allRows = groups.map { (name, list) -> Row(name, "", "${list.size} trk ▸", null) }
-            b.crumb.text = if (mode == Mode.ARTISTS) "ALL ARTISTS (${groups.size})" else "ALL ALBUMS (${groups.size})"
+            b.crumb.text = when (mode) {
+                Mode.ARTISTS -> "ALL ARTISTS (${groups.size})"
+                Mode.GENRE -> "ALL GENRES (${groups.size})"
+                else -> "ALL ALBUMS (${groups.size})"
+            }
             b.actionRow.visibility = View.GONE
             b.browserHeader.root.visibility = View.GONE
         } else {
@@ -300,46 +396,278 @@ class BrowserActivity : AppCompatActivity() {
             holder.title.setTextColor(color)
             holder.secondary.setTextColor(color)
             holder.right.setTextColor(color)
-            holder.itemView.setBackgroundColor(Color.TRANSPARENT)
-
             val isLeaf = row.track != null
-            holder.handle.visibility = if (isLeaf) View.VISIBLE else View.INVISIBLE
-            holder.handle.alpha = if (filterQuery.isBlank()) 1f else 0.3f
-            holder.handle.setOnTouchListener { _, event ->
-                if (isLeaf && filterQuery.isBlank() && event.actionMasked == MotionEvent.ACTION_DOWN) {
-                    itemTouchHelper.startDrag(holder)
+            val path = row.track?.file?.absolutePath
+            val isSelected = selectMode && path != null && path in selected
+            holder.itemView.setBackgroundColor(
+                if (isSelected) skinColor(R.attr.skinPanelDeep) else Color.TRANSPARENT
+            )
+
+            if (selectMode && isLeaf) {
+                // In select mode the handle column doubles as a checkbox.
+                holder.handle.text = if (isSelected) "☑" else "☐"
+                holder.handle.visibility = View.VISIBLE
+                holder.handle.alpha = 1f
+                holder.handle.setTextColor(skinColor(if (isSelected) R.attr.skinAccent else R.attr.skinText))
+                holder.handle.setOnTouchListener(null)
+            } else {
+                // Normal mode: restore the drag glyph (a recycled row may carry
+                // a checkbox). Drag-reorder is only meaningful inside an open
+                // artist/album group where order persists per group — the flat
+                // SONGS list and group lists show no handle.
+                holder.handle.text = "⠿"
+                holder.handle.setTextColor(skinColor(R.attr.skinBevelLight))
+                val canDrag = isLeaf && mode != Mode.SONGS && !selectMode
+                holder.handle.visibility = if (canDrag) View.VISIBLE else View.INVISIBLE
+                holder.handle.alpha = if (filterQuery.isBlank()) 1f else 0.3f
+                holder.handle.setOnTouchListener { _, event ->
+                    if (canDrag && filterQuery.isBlank() && event.actionMasked == MotionEvent.ACTION_DOWN) {
+                        itemTouchHelper.startDrag(holder)
+                    }
+                    false
                 }
-                false
             }
 
             holder.itemView.setOnClickListener {
                 val pos = holder.bindingAdapterPosition
                 val r = rows.getOrNull(pos) ?: return@setOnClickListener
-                if (r.track == null) {
+                val t = r.track
+                if (selectMode) {
+                    if (t != null) { toggleSelection(t); notifyItemChanged(pos) }
+                    return@setOnClickListener
+                }
+                if (t == null) {
                     groupKey = r.label
                     clearSearch()
                     rebuild()
                 } else {
-                    val key = groupKey ?: return@setOnClickListener
+                    val key = trackListKey() ?: return@setOnClickListener
                     svc?.setQueue(currentDisplayedTracks(), key, pos, autoplay = true)
                     finish()
                 }
             }
             holder.itemView.setOnLongClickListener {
-                val pos = holder.bindingAdapterPosition
-                val r = rows.getOrNull(pos)
-                if (r?.track != null) {
-                    val added = svc?.enqueue(listOf(r.track)) ?: 0
-                    flash(if (added > 0) "QUEUED: ${r.track.title}" else "ALREADY IN QUEUE")
+                if (!selectMode) {
+                    val t = rows.getOrNull(holder.bindingAdapterPosition)?.track
+                    if (t != null) showTrackMenu(holder.itemView, t)
                 }
                 true
             }
         }
     }
 
+    /** Per-track long-press menu: play it here, edit/rename its tags, or queue it. */
+    private fun showTrackMenu(anchor: View, track: PlayerService.Track) {
+        popupMenu(anchor, listOf(
+            "▶ PLAY" to {
+                val disp = currentDisplayedTracks()
+                val i = disp.indexOfFirst { it.file == track.file }.coerceAtLeast(0)
+                svc?.setQueue(disp, trackListKey() ?: "ALL SONGS", i, autoplay = true)
+                finish()
+            },
+            "✎ EDIT TAGS / RENAME" to {
+                TagEditDialog.show(this, scope, track) {
+                    svc?.loadTracks()   // renamed file → rescan; onTracksReloaded rebuilds
+                    flash("TAGS UPDATED")
+                }
+            },
+            "＋ QUEUE" to {
+                val added = svc?.enqueue(listOf(track)) ?: 0
+                flash(if (added > 0) "QUEUED: ${track.title}" else "ALREADY IN QUEUE")
+            },
+            "☑ SELECT (BATCH)" to { enterSelectMode(track) },
+        ))
+    }
+
+    /** Bevel-chrome dropdown menu anchored to [anchor]. */
+    private fun popupMenu(anchor: View, items: List<Pair<String, () -> Unit>>) {
+        val panel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = getDrawable(R.drawable.bevel_raised)
+            val p = (5 * density).toInt()
+            setPadding(p, p, p, p)
+            minimumWidth = (200 * density).toInt()
+        }
+        val popup = PopupWindow(panel, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, true)
+        popup.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        popup.elevation = 12f
+        items.forEach { (label, action) ->
+            panel.addView(TextView(this).apply {
+                text = label
+                setTextColor(skinColor(R.attr.skinText))
+                textSize = 12f
+                typeface = Typeface.MONOSPACE
+                letterSpacing = 0.08f
+                setPadding((12 * density).toInt(), (10 * density).toInt(), (12 * density).toInt(), (10 * density).toInt())
+                setOnClickListener { popup.dismiss(); action() }
+            })
+        }
+        popup.showAsDropDown(anchor, (12 * density).toInt(), -(anchor.height / 2))
+    }
+
+    /**
+     * Batch find-and-replace across the selected tracks. Replacement is
+     * literal (not regex), applied to TITLE and/or ARTIST, with an optional
+     * genre set. Each track is retagged and renamed through the same pipeline
+     * as a single edit, so filenames follow the new tags.
+     */
+    private fun batchRenameDialog() {
+        val lib = svc?.library ?: emptyList()
+        val targets = selected.mapNotNull { p -> lib.firstOrNull { it.file.absolutePath == p } }
+        if (targets.isEmpty()) { flash("SELECT SOME TRACKS FIRST"); return }
+
+        val dialog = Dialog(this)
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = getDrawable(R.drawable.bevel_raised)
+            val p = (10 * density).toInt()
+            setPadding(p, p, p, p)
+        }
+        root.addView(TextView(this).apply {
+            text = "◢ BATCH RENAME (${targets.size})"
+            setTextColor(skinColor(R.attr.skinAccent))
+            textSize = 12f
+            typeface = Typeface.MONOSPACE
+            setTypeface(typeface, Typeface.BOLD)
+            letterSpacing = 0.15f
+            setPadding(0, 0, 0, (6 * density).toInt())
+        })
+        root.addView(TextView(this).apply {
+            text = "Find & replace text in the selected tracks' tags. The filename follows the new tags."
+            setTextColor(skinColor(R.attr.skinText))
+            textSize = 10f
+            typeface = Typeface.MONOSPACE
+            setPadding(0, 0, 0, (4 * density).toInt())
+        })
+
+        fun field(label: String, hint: String): EditText {
+            root.addView(TextView(this).apply {
+                text = label
+                setTextColor(skinColor(R.attr.skinText))
+                textSize = 10f
+                typeface = Typeface.MONOSPACE
+                letterSpacing = 0.1f
+                setPadding(0, (8 * density).toInt(), 0, (3 * density).toInt())
+            })
+            val input = EditText(this).apply {
+                this.hint = hint
+                setTextColor(skinColor(R.attr.skinLcd))
+                setHintTextColor(skinColor(R.attr.skinBevelLight))
+                textSize = 13f
+                typeface = Typeface.MONOSPACE
+                background = getDrawable(R.drawable.lcd_sunken)
+                setPadding((10 * density).toInt(), (9 * density).toInt(), (10 * density).toInt(), (9 * density).toInt())
+            }
+            root.addView(input)
+            return input
+        }
+
+        val findInput = field("FIND", "text to find (blank = only set genre)")
+        val replaceInput = field("REPLACE WITH", "replacement (blank = delete the text)")
+
+        // "Apply to" TITLE / ARTIST toggle chips
+        root.addView(TextView(this).apply {
+            text = "APPLY TO"
+            setTextColor(skinColor(R.attr.skinText))
+            textSize = 10f
+            typeface = Typeface.MONOSPACE
+            letterSpacing = 0.1f
+            setPadding(0, (8 * density).toInt(), 0, (3 * density).toInt())
+        })
+        fun toggleChip(caption: String, initial: Boolean): TextView {
+            val chip = TextView(this).apply {
+                gravity = Gravity.CENTER
+                textSize = 11f
+                typeface = Typeface.MONOSPACE
+                background = getDrawable(R.drawable.wa_button)
+                layoutParams = LinearLayout.LayoutParams(0, (36 * density).toInt(), 1f)
+                    .apply { marginEnd = (4 * density).toInt() }
+            }
+            fun render() {
+                chip.text = (if (chip.isSelected) "☑ " else "☐ ") + caption
+                chip.setTextColor(skinColor(if (chip.isSelected) R.attr.skinAccent else R.attr.skinText))
+            }
+            chip.isSelected = initial
+            render()
+            chip.setOnClickListener { chip.isSelected = !chip.isSelected; render() }
+            return chip
+        }
+        val titleChip = toggleChip("TITLE", true)
+        val artistChip = toggleChip("ARTIST", false)
+        root.addView(LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(titleChip)
+            addView(artistChip)
+        })
+
+        val genreInput = field("SET GENRE (optional)", "blank = keep each track's genre")
+
+        val btnRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, (10 * density).toInt(), 0, 0)
+        }
+        fun btn(label: String, action: () -> Unit) = TextView(this).apply {
+            text = label
+            gravity = Gravity.CENTER
+            setTextColor(skinColor(R.attr.skinAccent))
+            textSize = 12f
+            typeface = Typeface.MONOSPACE
+            setTypeface(typeface, Typeface.BOLD)
+            background = getDrawable(R.drawable.wa_button)
+            layoutParams = LinearLayout.LayoutParams(0, (38 * density).toInt(), 1f)
+                .apply { marginEnd = (4 * density).toInt() }
+            setOnClickListener { action() }
+        }
+        btnRow.addView(btn("APPLY") {
+            val find = findInput.text.toString()
+            val replace = replaceInput.text.toString()
+            val setGenre = genreInput.text.toString().trim().ifBlank { null }
+            val doTitle = titleChip.isSelected
+            val doArtist = artistChip.isSelected
+            when {
+                find.isBlank() && setGenre == null -> { flash("NOTHING TO CHANGE"); return@btn }
+                find.isNotBlank() && !doTitle && !doArtist -> { flash("PICK TITLE OR ARTIST"); return@btn }
+            }
+            dialog.dismiss()
+            scope.launch {
+                val changed = ArrayList<String>()
+                var n = 0
+                for (t in targets) {
+                    // A placeholder artist ("RIP DOWNLOADS"/"Unknown Artist") is
+                    // treated as "no artist" — so title-only renames keep raw
+                    // downloads as "Title.ext" instead of baking the placeholder
+                    // into the filename.
+                    val isPlaceholder = t.artist.isBlank() ||
+                        t.artist == "Unknown Artist" || t.artist == "RIP DOWNLOADS"
+                    val baseArtist = if (isPlaceholder) null else t.artist
+                    val newTitle = if (doTitle && find.isNotBlank()) t.title.replace(find, replace) else t.title
+                    val newArtist = if (doArtist && find.isNotBlank() && baseArtist != null)
+                        baseArtist.replace(find, replace).ifBlank { null } else baseArtist
+                    flash("RENAMING ${n + 1}/${targets.size}…")
+                    val out = TagCleaner.retagAndRename(this@BrowserActivity, t.file, newArtist, newTitle, setGenre)
+                    changed += t.file.absolutePath   // old path (now gone) so MediaStore drops it
+                    changed += out.absolutePath
+                    n++
+                }
+                MediaScannerConnection.scanFile(applicationContext, changed.toTypedArray(), null, null)
+                exitSelectMode(rebuild = false)
+                svc?.loadTracks()
+                flash("RENAMED $n")
+            }
+        })
+        btnRow.addView(btn("CANCEL") { dialog.dismiss() })
+        root.addView(btnRow)
+
+        dialog.setContentView(root)
+        dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        dialog.window?.setLayout((320 * density).toInt(), ViewGroup.LayoutParams.WRAP_CONTENT)
+        dialog.show()
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         svc?.let { if (it.listener === serviceListener) it.listener = null }
         runCatching { unbindService(conn) }
+        scope.cancel()
     }
 }

@@ -38,7 +38,8 @@ class PlayerService : Service() {
         val title: String,
         var durationMs: Int = 0,
         var artist: String = "Unknown Artist",
-        var album: String = "Unknown Album"
+        var album: String = "Unknown Album",
+        var genre: String = "Unknown Genre"
     )
 
     interface Listener {
@@ -190,13 +191,18 @@ class PlayerService : Service() {
 
             // 2) Every other song on the phone via the media library
             if (hasAudioPermission()) runCatching {
-                val proj = arrayOf(
-                    MediaStore.Audio.Media.DATA,
-                    MediaStore.Audio.Media.TITLE,
-                    MediaStore.Audio.Media.DURATION,
-                    MediaStore.Audio.Media.ARTIST,
-                    MediaStore.Audio.Media.ALBUM
-                )
+                // GENRE as a Media column only exists on API 30+; on older
+                // devices we leave it out of the query and let the background
+                // tag-read pass below fill genre from each file instead.
+                val hasGenreCol = Build.VERSION.SDK_INT >= 30
+                val proj = buildList {
+                    add(MediaStore.Audio.Media.DATA)
+                    add(MediaStore.Audio.Media.TITLE)
+                    add(MediaStore.Audio.Media.DURATION)
+                    add(MediaStore.Audio.Media.ARTIST)
+                    add(MediaStore.Audio.Media.ALBUM)
+                    if (hasGenreCol) add(MediaStore.Audio.Media.GENRE)
+                }.toTypedArray()
                 contentResolver.query(
                     MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, proj,
                     "${MediaStore.Audio.Media.IS_MUSIC} != 0", null,
@@ -207,25 +213,29 @@ class PlayerService : Service() {
                     val iDur = c.getColumnIndexOrThrow(MediaStore.Audio.Media.DURATION)
                     val iArtist = c.getColumnIndexOrThrow(MediaStore.Audio.Media.ARTIST)
                     val iAlbum = c.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM)
+                    val iGenre = if (hasGenreCol) c.getColumnIndex(MediaStore.Audio.Media.GENRE) else -1
                     while (c.moveToNext()) {
                         val path = c.getString(iData) ?: continue
                         val artist = c.getString(iArtist)
                             ?.takeIf { it.isNotBlank() && it != "<unknown>" } ?: "Unknown Artist"
                         val album = c.getString(iAlbum)
                             ?.takeIf { it.isNotBlank() && it != "<unknown>" } ?: "Unknown Album"
+                        val genre = (if (iGenre >= 0) c.getString(iGenre) else null)
+                            ?.takeIf { it.isNotBlank() && it != "<unknown>" } ?: "Unknown Genre"
                         val existing = found[path]
                         if (existing != null) {
                             // Our download, already indexed — take the real tags
                             if (c.getInt(iDur) > 0) existing.durationMs = c.getInt(iDur)
                             if (artist != "Unknown Artist") existing.artist = artist
                             if (album != "Unknown Album") existing.album = album
+                            if (genre != "Unknown Genre") existing.genre = genre
                             continue
                         }
                         val f = File(path)
                         if (!f.exists()) continue
                         found[path] = Track(
                             f, c.getString(iTitle) ?: f.nameWithoutExtension,
-                            c.getInt(iDur), artist, album
+                            c.getInt(iDur), artist, album, genre
                         )
                     }
                 }
@@ -244,20 +254,39 @@ class PlayerService : Service() {
                 listener?.onTracksReloaded()
             }
 
+            // Fill anything MediaStore didn't give us straight from the file's
+            // own tags: duration always (some rows report 0), and genre on the
+            // devices/files the GENRE column above couldn't cover (API < 30, or
+            // a file MediaStore never tagged). Both come from a single
+            // retriever open per track, and only when actually missing, so this
+            // stays a one-time cost that skips already-complete tracks.
             list.forEachIndexed { i, t ->
-                if (t.durationMs == 0) t.durationMs = readDurationMs(t.file)
+                val needDur = t.durationMs == 0
+                val needGenre = t.genre == "Unknown Genre"
+                if (needDur || needGenre) readFileTags(t, needDur, needGenre)
                 if (i % 8 == 7) main.post { listener?.onTracksReloaded() }
             }
             main.post { listener?.onTracksReloaded() }
         }
     }
 
-    private fun readDurationMs(f: File): Int {
+    private fun readFileTags(t: Track, wantDuration: Boolean, wantGenre: Boolean) {
         val mmr = MediaMetadataRetriever()
-        return try {
-            mmr.setDataSource(f.absolutePath)
-            mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toIntOrNull() ?: 0
-        } catch (e: Exception) { 0 } finally { runCatching { mmr.release() } }
+        try {
+            mmr.setDataSource(t.file.absolutePath)
+            if (wantDuration) {
+                mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+                    ?.toIntOrNull()?.let { t.durationMs = it }
+            }
+            if (wantGenre) {
+                mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_GENRE)
+                    ?.takeIf { it.isNotBlank() }?.let { t.genre = it }
+            }
+        } catch (e: Exception) {
+            // leave defaults on any unreadable file
+        } finally {
+            runCatching { mmr.release() }
+        }
     }
 
     // ---------- Transport ----------

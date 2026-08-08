@@ -486,76 +486,50 @@ class PlayerActivity : AppCompatActivity(), DownloadEngine.Listener {
         }
     }
 
-    /**
-     * Manual fix for the cases the automated pipeline (DownloadEngine +
-     * TagCleaner) doesn't get right — an obscure track the iTunes lookup
-     * can't find, or a title it split wrong. Operates on the currently
-     * playing track; genre starts blank rather than prefilled since Track
-     * doesn't carry a genre field (would need a separate MediaStore genre
-     * query to read it back, not worth it just to pre-fill a rarely-edited
-     * field — leaving it blank is a fine default and typing over a wrong
-     * guess isn't meaningfully different from typing into an empty box).
-     */
+    /** ≡ menu entry: edits the currently-playing track. */
     private fun editTagsDialog() {
         val t = svc?.currentTrack ?: run { flashMarquee("NOTHING PLAYING TO EDIT"); return }
-        waDialog("EDIT TAGS") { root, dialog ->
-            fun field(label: String, value: String, hint: String): EditText {
-                root.addView(TextView(this).apply {
-                    text = label
-                    setTextColor(skinColor(R.attr.skinText))
-                    textSize = 10f
-                    typeface = Typeface.MONOSPACE
-                    letterSpacing = 0.1f
-                    setPadding(0, (8 * density).toInt(), 0, (3 * density).toInt())
-                })
-                val input = EditText(this).apply {
-                    setText(value)
-                    this.hint = hint
-                    setTextColor(skinColor(R.attr.skinLcd))
-                    setHintTextColor(skinColor(R.attr.skinBevelLight))
-                    textSize = 13f
-                    typeface = Typeface.MONOSPACE
-                    background = getDrawable(R.drawable.lcd_sunken)
-                    setPadding((10 * density).toInt(), (9 * density).toInt(), (10 * density).toInt(), (9 * density).toInt())
-                }
-                root.addView(input)
-                return input
-            }
-            val titleInput = field("TITLE", t.title, "song title")
-            val artistInput = field("ARTIST", t.artist, "artist")
-            val genreInput = field("GENRE", "", "e.g. Rock")
+        openTagEditor(t)
+    }
 
-            val row = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                setPadding(0, (10 * density).toInt(), 0, 0)
-            }
-            fun btn(label: String, action: () -> Unit) = TextView(this).apply {
+    /**
+     * Opens the shared edit/rename sheet for any track (playing or not) — the
+     * manual fix for what the automated pipeline (DownloadEngine + TagCleaner)
+     * gets wrong: an obscure track the iTunes lookup can't find, or a title it
+     * split wrong. The sheet pre-fills the existing genre and pre-splits a raw
+     * "Artist - Title" filename into the fields; see [TagEditDialog].
+     */
+    private fun openTagEditor(t: PlayerService.Track) {
+        TagEditDialog.show(this, scope, t) {
+            svc?.loadTracks()
+            flashMarquee("TAGS UPDATED")
+        }
+    }
+
+    /** Bevel-chrome dropdown menu anchored to [anchor] — used for a row's long-press options. */
+    private fun popupMenu(anchor: View, items: List<Pair<String, () -> Unit>>) {
+        val panel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = getDrawable(R.drawable.bevel_raised)
+            val p = (5 * density).toInt()
+            setPadding(p, p, p, p)
+            minimumWidth = (200 * density).toInt()
+        }
+        val popup = PopupWindow(panel, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, true)
+        popup.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        popup.elevation = 12f
+        items.forEach { (label, action) ->
+            panel.addView(TextView(this).apply {
                 text = label
-                gravity = Gravity.CENTER
-                setTextColor(skinColor(R.attr.skinAccent))
+                setTextColor(skinColor(R.attr.skinText))
                 textSize = 12f
                 typeface = Typeface.MONOSPACE
-                setTypeface(typeface, Typeface.BOLD)
-                background = getDrawable(R.drawable.wa_button)
-                layoutParams = LinearLayout.LayoutParams(0, (38 * density).toInt(), 1f)
-                    .apply { marginEnd = (4 * density).toInt() }
-                setOnClickListener { action() }
-            }
-            row.addView(btn("SAVE") {
-                val newTitle = titleInput.text.toString().trim().ifBlank { t.title }
-                val newArtist = artistInput.text.toString().trim().ifBlank { null }
-                val newGenre = genreInput.text.toString().trim().ifBlank { null }
-                dialog.dismiss()
-                flashMarquee("SAVING TAGS…")
-                scope.launch {
-                    TagCleaner.retagAndRename(this@PlayerActivity, t.file, newArtist, newTitle, newGenre)
-                    svc?.loadTracks()
-                    flashMarquee("TAGS UPDATED")
-                }
+                letterSpacing = 0.08f
+                setPadding((12 * density).toInt(), (10 * density).toInt(), (12 * density).toInt(), (10 * density).toInt())
+                setOnClickListener { popup.dismiss(); action() }
             })
-            row.addView(btn("CANCEL") { dialog.dismiss() })
-            root.addView(row)
         }
+        popup.showAsDropDown(anchor, (12 * density).toInt(), -(anchor.height / 2))
     }
 
     // ---------- Download status strip ----------
@@ -635,9 +609,7 @@ class PlayerActivity : AppCompatActivity(), DownloadEngine.Listener {
                 val all = svc?.tracks ?: emptyList()
                 val q = filterQuery.trim()
                 if (q.isEmpty()) return all.withIndex().toList()
-                return all.withIndex().filter { (_, t) ->
-                    t.title.contains(q, ignoreCase = true) || t.artist.contains(q, ignoreCase = true)
-                }
+                return all.withIndex().filter { (_, t) -> Search.matches(q, t.title, t.artist) }
             }
 
         inner class VH(view: View) : RecyclerView.ViewHolder(view) {
@@ -676,17 +648,31 @@ class PlayerActivity : AppCompatActivity(), DownloadEngine.Listener {
                 if (pos != RecyclerView.NO_POSITION) svc?.play(list[pos].index)
             }
             holder.itemView.setOnLongClickListener {
-                // Long-press removes a track from the queue (not from disk)
+                // Long-press opens a per-track menu: play it, edit/rename its
+                // tags, or remove it from the queue (removal is queue-only,
+                // never deletes the file from disk). Actions re-resolve the
+                // row's real index by file at click time rather than trusting
+                // the index captured now, so a queue change between opening
+                // the menu and tapping can't act on the wrong track.
                 val pos = holder.bindingAdapterPosition
                 val s = svc
                 if (s != null && pos != RecyclerView.NO_POSITION) {
-                    val realIdx = list[pos].index
-                    if (realIdx in s.tracks.indices) {
-                        val t2 = s.tracks[realIdx]
-                        val newList = s.tracks.toMutableList().also { it.removeAt(realIdx) }
-                        s.setQueue(newList, s.queueName)
-                        flashMarquee("REMOVED: ${t2.title}")
-                    }
+                    val t = list[pos].value
+                    popupMenu(holder.itemView, listOf(
+                        "▶ PLAY" to {
+                            val i = s.tracks.indexOfFirst { it.file == t.file }
+                            if (i >= 0) s.play(i)
+                        },
+                        "✎ EDIT TAGS / RENAME" to { openTagEditor(t) },
+                        "✕ REMOVE FROM QUEUE" to {
+                            val i = s.tracks.indexOfFirst { it.file == t.file }
+                            if (i >= 0) {
+                                val newList = s.tracks.toMutableList().also { it.removeAt(i) }
+                                s.setQueue(newList, s.queueName)
+                                flashMarquee("REMOVED: ${t.title}")
+                            }
+                        },
+                    ))
                 }
                 true
             }
