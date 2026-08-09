@@ -8,6 +8,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
+import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
@@ -24,8 +25,10 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.widget.EditText
+import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.PopupWindow
+import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
@@ -342,6 +345,11 @@ class PlayerActivity : AppCompatActivity(), DownloadEngine.Listener {
         item("♫ WHOLE LIBRARY") { clearSearch(); svc?.resetToLibrary() }
         item("✎ EDIT TAGS") { editTagsDialog() }
         sep()
+        item("🎚 EQUALIZER") { equalizerDialog() }
+        item("🐢 SPEED / PITCH") { speedDialog() }
+        item("🔁 A-B LOOP") { loopDialog() }
+        item("⏱ SLEEP TIMER") { sleepDialog() }
+        sep()
         item("◨ SKINS") { skinsDialog() }
         item("⟳ RESCAN LIBRARY") { svc?.loadTracks(); flashMarquee("RESCANNING…") }
         item("🧹 CLEAN UP TITLES") {
@@ -483,6 +491,197 @@ class PlayerActivity : AppCompatActivity(), DownloadEngine.Listener {
                 Skin.set(this, i)
                 recreate()
             }
+        }
+    }
+
+    // ---------- Effects / speed / loop / sleep ----------
+
+    private fun skinnedSeekBar(maxVal: Int, value: Int, onChange: (Int) -> Unit): SeekBar =
+        SeekBar(this).apply {
+            max = maxVal
+            progress = value.coerceIn(0, maxVal)
+            progressTintList = ColorStateList.valueOf(skinColor(R.attr.skinLcd))
+            thumbTintList = ColorStateList.valueOf(skinColor(R.attr.skinAccent))
+            progressBackgroundTintList = ColorStateList.valueOf(skinColor(R.attr.skinBevelLight))
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar, p: Int, fromUser: Boolean) { if (fromUser) onChange(p) }
+                override fun onStartTrackingTouch(sb: SeekBar) {}
+                override fun onStopTrackingTouch(sb: SeekBar) {}
+            })
+        }
+
+    private fun dialogLabel(text: String, accent: Boolean = false): TextView = TextView(this).apply {
+        this.text = text
+        setTextColor(skinColor(if (accent) R.attr.skinAccent else R.attr.skinText))
+        textSize = 10f
+        typeface = Typeface.MONOSPACE
+        letterSpacing = 0.1f
+        setPadding(0, (9 * density).toInt(), 0, (2 * density).toInt())
+    }
+
+    private fun dialogButton(label: String, action: () -> Unit): TextView = TextView(this).apply {
+        text = label
+        gravity = Gravity.CENTER
+        setTextColor(skinColor(R.attr.skinAccent))
+        textSize = 12f
+        typeface = Typeface.MONOSPACE
+        setTypeface(typeface, Typeface.BOLD)
+        background = getDrawable(R.drawable.wa_button)
+        layoutParams = LinearLayout.LayoutParams(0, (38 * density).toInt(), 1f)
+            .apply { marginEnd = (4 * density).toInt() }
+        setOnClickListener { action() }
+    }
+
+    private fun equalizerDialog() {
+        val s = svc ?: return
+        if (s.eqBandCount == 0) { flashMarquee("EQUALIZER NOT AVAILABLE ON THIS DEVICE"); return }
+        waDialog("EQUALIZER") { root, dialog ->
+            val toggle = TextView(this).apply {
+                gravity = Gravity.CENTER
+                textSize = 12f
+                typeface = Typeface.MONOSPACE
+                setTypeface(typeface, Typeface.BOLD)
+                background = getDrawable(R.drawable.wa_button)
+                setPadding(0, (9 * density).toInt(), 0, (9 * density).toInt())
+            }
+            fun paintToggle() {
+                toggle.text = if (s.fxEnabled) "EQ: ON" else "EQ: OFF"
+                toggle.setTextColor(skinColor(if (s.fxEnabled) R.attr.skinLcd else R.attr.skinText))
+            }
+            paintToggle()
+            toggle.setOnClickListener { s.setFxEnabled(!s.fxEnabled); paintToggle() }
+            root.addView(toggle)
+
+            // Preset chips
+            if (s.eqPresetNames.isNotEmpty()) {
+                val prow = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    setPadding(0, (8 * density).toInt(), 0, 0)
+                }
+                s.eqPresetNames.forEachIndexed { i, name ->
+                    prow.addView(TextView(this).apply {
+                        text = name
+                        textSize = 10f
+                        typeface = Typeface.MONOSPACE
+                        setTextColor(skinColor(R.attr.skinAccent))
+                        background = getDrawable(R.drawable.wa_button)
+                        setPadding((10 * density).toInt(), (6 * density).toInt(), (10 * density).toInt(), (6 * density).toInt())
+                        layoutParams = LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+                        ).apply { marginEnd = (4 * density).toInt() }
+                        setOnClickListener { s.applyEqPreset(i); dialog.dismiss(); equalizerDialog() }
+                    })
+                }
+                root.addView(HorizontalScrollView(this).apply {
+                    isHorizontalScrollBarEnabled = false
+                    addView(prow)
+                })
+            }
+
+            // Bands (scrollable so many-band devices don't push DONE off screen)
+            val bandsBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            val range = (s.eqMaxLevel - s.eqMinLevel).toInt()
+            for (b in 0 until s.eqBandCount) {
+                val freq = s.eqCenterFreq(b)
+                bandsBox.addView(dialogLabel(if (freq >= 1000) "${freq / 1000} kHz" else "$freq Hz"))
+                bandsBox.addView(skinnedSeekBar(range, s.eqBand(b) - s.eqMinLevel) { p ->
+                    s.setEqBand(b, (p + s.eqMinLevel).toShort())
+                })
+            }
+            bandsBox.addView(dialogLabel("BASS BOOST", accent = true))
+            bandsBox.addView(skinnedSeekBar(1000, s.bassStrength) { p -> s.setBass(p) })
+            root.addView(ScrollView(this).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, (260 * density).toInt()
+                )
+                addView(bandsBox)
+            })
+
+            root.addView(dialogButton("DONE") { dialog.dismiss() }.apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, (38 * density).toInt()
+                ).apply { topMargin = (10 * density).toInt() }
+            })
+        }
+    }
+
+    private fun speedDialog() {
+        val s = svc ?: return
+        waDialog("SPEED / PITCH") { root, dialog ->
+            val steps = 1000
+            fun norm(v: Float, min: Float, max: Float) = (((v - min) / (max - min)) * steps).toInt()
+            fun value(p: Int, min: Float, max: Float) = min + (p.toFloat() / steps) * (max - min)
+
+            fun slider(title: String, suffix: String, value: Float, min: Float, max: Float, onSet: (Float) -> Unit): SeekBar {
+                val lab = dialogLabel("$title: ${String.format(Locale.US, "%.2f", value)}$suffix", accent = true)
+                root.addView(lab)
+                val bar = skinnedSeekBar(steps, norm(value, min, max)) { p ->
+                    val v = value(p, min, max)
+                    lab.text = "$title: ${String.format(Locale.US, "%.2f", v)}$suffix"
+                    onSet(v)
+                }
+                root.addView(bar)
+                return bar
+            }
+            val spBar = slider("SPEED", "x", s.speed, 0.5f, 2f) { s.setSpeed(it) }
+            val piBar = slider("PITCH", "", s.pitch, 0.5f, 2f) { s.setPitch(it) }
+
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(0, (12 * density).toInt(), 0, 0)
+            }
+            row.addView(dialogButton("RESET") {
+                s.setSpeed(1f); s.setPitch(1f)
+                spBar.progress = norm(1f, 0.5f, 2f)
+                piBar.progress = norm(1f, 0.5f, 2f)
+            })
+            row.addView(dialogButton("DONE") { dialog.dismiss() })
+            root.addView(row)
+        }
+    }
+
+    private fun loopDialog() {
+        val s = svc ?: return
+        waDialog("A-B LOOP") { root, dialog ->
+            val status = TextView(this).apply {
+                setTextColor(skinColor(R.attr.skinLcd))
+                textSize = 13f
+                typeface = Typeface.MONOSPACE
+                gravity = Gravity.CENTER
+                background = getDrawable(R.drawable.lcd_sunken)
+                setPadding((10 * density).toInt(), (10 * density).toInt(), (10 * density).toInt(), (10 * density).toInt())
+            }
+            fun refresh() {
+                val a = if (s.loopA >= 0) fmt(s.loopA) else "--:--"
+                val bEnd = if (s.loopB > s.loopA && s.loopB >= 0) fmt(s.loopB) else "--:--"
+                status.text = "A  $a   ↔   B  $bEnd"
+            }
+            refresh()
+            root.addView(status)
+
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(0, (10 * density).toInt(), 0, 0)
+            }
+            row.addView(dialogButton("SET A") { s.setLoopA(); refresh(); flashMarquee("LOOP A SET") })
+            row.addView(dialogButton("SET B") { s.setLoopB(); refresh(); flashMarquee(if (s.loopB > s.loopA) "LOOP ON" else "SET A FIRST") })
+            row.addView(dialogButton("CLEAR") { s.clearLoop(); refresh() })
+            root.addView(row)
+
+            root.addView(dialogButton("DONE") { dialog.dismiss() }.apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, (38 * density).toInt()
+                ).apply { topMargin = (10 * density).toInt() }
+            })
+        }
+    }
+
+    private fun sleepDialog() {
+        val opts = listOf("OFF", "15 MIN", "30 MIN", "45 MIN", "60 MIN")
+        val mins = listOf(0, 15, 30, 45, 60)
+        waListDialog("SLEEP TIMER", opts, "") { i ->
+            svc?.setSleepTimer(mins[i])
+            flashMarquee(if (mins[i] == 0) "SLEEP TIMER OFF" else "SLEEP IN ${mins[i]} MIN")
         }
     }
 

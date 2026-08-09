@@ -22,6 +22,9 @@ import android.media.AudioManager
 import android.media.MediaMetadata
 import android.media.MediaMetadataRetriever
 import android.media.MediaPlayer
+import android.media.PlaybackParams
+import android.media.audiofx.BassBoost
+import android.media.audiofx.Equalizer
 import android.media.session.MediaSession
 import android.media.session.PlaybackState
 import android.os.Binder
@@ -110,6 +113,26 @@ class PlayerService : Service() {
     private var shuffleBag = mutableListOf<Int>()
     private val shuffleHistory = ArrayDeque<Int>()
 
+    // ---------- Audio effects / speed / sleep / A-B loop ----------
+    private var eq: Equalizer? = null
+    private var bass: BassBoost? = null
+    // Device EQ capabilities, probed once (0 bands = EQ unsupported here).
+    var eqBandCount = 0; private set
+    var eqMinLevel: Short = -1500; private set
+    var eqMaxLevel: Short = 1500; private set
+    private val eqCenterFreqs = mutableListOf<Int>()   // Hz per band
+    val eqPresetNames = mutableListOf<String>()
+    // Persisted user FX state.
+    var fxEnabled = false; private set
+    private var eqLevels = ShortArray(0)               // millibel per band
+    var bassStrength = 0; private set                  // 0..1000
+    var speed = 1f; private set
+    var pitch = 1f; private set
+    // Sleep timer + A-B loop.
+    private var sleepEndMs = 0L
+    var loopA = -1; private set
+    var loopB = -1; private set
+
     private val focusListener = AudioManager.OnAudioFocusChangeListener { change ->
         when (change) {
             // Someone took focus for good (another music app) — stop and don't
@@ -173,6 +196,8 @@ class PlayerService : Service() {
             IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY),
             ContextCompat.RECEIVER_NOT_EXPORTED
         )
+        probeFxCaps()
+        loadFxState()
         loadTracks()
     }
 
@@ -219,6 +244,167 @@ class PlayerService : Service() {
         }.getOrNull()
         artCache = t.file.absolutePath to bmp
         return bmp
+    }
+
+    // ---------- Audio effects (EQ + bass) ----------
+
+    /** One-time probe of the device's EQ capabilities via a throwaway global instance. */
+    private fun probeFxCaps() {
+        runCatching {
+            val e = Equalizer(0, 0)
+            eqBandCount = e.numberOfBands.toInt()
+            e.bandLevelRange.let { eqMinLevel = it[0]; eqMaxLevel = it[1] }
+            eqCenterFreqs.clear()
+            for (b in 0 until eqBandCount) eqCenterFreqs.add(e.getCenterFreq(b.toShort()) / 1000)
+            eqPresetNames.clear()
+            for (p in 0 until e.numberOfPresets.toInt()) eqPresetNames.add(e.getPresetName(p.toShort()))
+            e.release()
+        }
+        if (eqLevels.size != eqBandCount) eqLevels = ShortArray(eqBandCount)
+    }
+
+    private fun attachFx(sessionId: Int) {
+        releaseFx()
+        if (!fxEnabled || eqBandCount == 0) return
+        runCatching {
+            eq = Equalizer(1, sessionId).apply {
+                enabled = true
+                for (b in 0 until eqBandCount) runCatching { setBandLevel(b.toShort(), eqLevels[b]) }
+            }
+        }
+        runCatching {
+            bass = BassBoost(1, sessionId).apply {
+                enabled = true
+                runCatching { setStrength(bassStrength.coerceIn(0, 1000).toShort()) }
+            }
+        }
+    }
+
+    private fun releaseFx() {
+        runCatching { eq?.release() }; eq = null
+        runCatching { bass?.release() }; bass = null
+    }
+
+    fun eqCenterFreq(band: Int): Int = eqCenterFreqs.getOrElse(band) { 0 }
+    fun eqBand(band: Int): Short = eqLevels.getOrElse(band) { 0 }
+
+    fun setFxEnabled(on: Boolean) {
+        fxEnabled = on
+        saveFx()
+        if (on) mp?.audioSessionId?.let { attachFx(it) } else releaseFx()
+    }
+
+    fun setEqBand(band: Int, level: Short) {
+        if (band !in 0 until eqBandCount) return
+        eqLevels[band] = level.coerceIn(eqMinLevel, eqMaxLevel)
+        runCatching { eq?.setBandLevel(band.toShort(), eqLevels[band]) }
+        saveFx()
+    }
+
+    /** Applies a built-in preset (reading its band levels via a throwaway instance so it works even when idle). */
+    fun applyEqPreset(preset: Int) {
+        runCatching {
+            val probe = Equalizer(0, 0)
+            probe.usePreset(preset.toShort())
+            for (b in 0 until eqBandCount) eqLevels[b] = probe.getBandLevel(b.toShort())
+            probe.release()
+        }
+        runCatching { eq?.let { for (b in 0 until eqBandCount) it.setBandLevel(b.toShort(), eqLevels[b]) } }
+        saveFx()
+    }
+
+    fun setBass(strength: Int) {
+        bassStrength = strength.coerceIn(0, 1000)
+        runCatching { bass?.setStrength(bassStrength.toShort()) }
+        saveFx()
+    }
+
+    // ---------- Speed / pitch ----------
+
+    private fun applyPlaybackParams(p: MediaPlayer) {
+        if (speed == 1f && pitch == 1f) return
+        runCatching { p.playbackParams = p.playbackParams.setSpeed(speed).setPitch(pitch) }
+    }
+
+    private fun applyLiveParams() {
+        val p = mp ?: return
+        if (!prepared) return
+        runCatching {
+            val wasPlaying = p.isPlaying
+            p.playbackParams = p.playbackParams.setSpeed(speed).setPitch(pitch)
+            // Setting params can (re)start the player; keep the paused state intact.
+            if (!wasPlaying && p.isPlaying) p.pause()
+        }
+    }
+
+    fun setSpeed(v: Float) { speed = v.coerceIn(0.25f, 3f); applyLiveParams(); saveFx() }
+    fun setPitch(v: Float) { pitch = v.coerceIn(0.5f, 2f); applyLiveParams(); saveFx() }
+
+    private fun saveFx() {
+        runCatching {
+            getSharedPreferences("player_fx", MODE_PRIVATE).edit()
+                .putBoolean("enabled", fxEnabled)
+                .putInt("bass", bassStrength)
+                .putString("bands", eqLevels.joinToString(","))
+                .putFloat("speed", speed)
+                .putFloat("pitch", pitch)
+                .apply()
+        }
+    }
+
+    private fun loadFxState() {
+        val p = getSharedPreferences("player_fx", MODE_PRIVATE)
+        fxEnabled = p.getBoolean("enabled", false)
+        bassStrength = p.getInt("bass", 0)
+        speed = p.getFloat("speed", 1f)
+        pitch = p.getFloat("pitch", 1f)
+        p.getString("bands", null)?.split(",")?.mapNotNull { it.toShortOrNull() }?.let {
+            if (it.size == eqBandCount) eqLevels = it.toShortArray()
+        }
+    }
+
+    // ---------- Sleep timer ----------
+
+    val sleepRemainingMs: Long get() = if (sleepEndMs > 0) (sleepEndMs - System.currentTimeMillis()).coerceAtLeast(0) else 0
+
+    private val sleepRunnable = Runnable { sleepEndMs = 0; pause() }
+
+    /** [minutes] <= 0 cancels. Pauses playback when it fires. */
+    fun setSleepTimer(minutes: Int) {
+        main.removeCallbacks(sleepRunnable)
+        if (minutes <= 0) { sleepEndMs = 0; return }
+        val ms = minutes * 60_000L
+        sleepEndMs = System.currentTimeMillis() + ms
+        main.postDelayed(sleepRunnable, ms)
+    }
+
+    // ---------- A-B loop ----------
+
+    private val loopChecker = object : Runnable {
+        override fun run() {
+            if (loopA in 0 until loopB && isPlaying && positionMs >= loopB) seekTo(loopA)
+            if (loopA >= 0 && loopB > loopA) main.postDelayed(this, 150)
+        }
+    }
+
+    fun setLoopA() {
+        loopA = positionMs
+        if (loopB in 0..loopA) loopB = -1
+        startLoopChecker()
+    }
+
+    fun setLoopB() {
+        if (loopA >= 0 && positionMs > loopA) { loopB = positionMs; startLoopChecker() }
+    }
+
+    fun clearLoop() {
+        loopA = -1; loopB = -1
+        main.removeCallbacks(loopChecker)
+    }
+
+    private fun startLoopChecker() {
+        main.removeCallbacks(loopChecker)
+        if (loopA >= 0 && loopB > loopA) main.post(loopChecker)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -474,6 +660,7 @@ class PlayerService : Service() {
         // Resume point applies only to the exact track we saved it for.
         val seekOnPrepare = if (idx == resumeIndex) resumePositionMs else 0
         resumeIndex = -1; resumePositionMs = 0
+        clearLoop()   // A-B loop is per-track; a new track starts fresh
         releasePlayer()
         current = idx
         val t = tracks[idx]
@@ -481,6 +668,7 @@ class PlayerService : Service() {
 
         val p = MediaPlayer()
         mp = p
+        attachFx(p.audioSessionId)
         // Keep the CPU alive while playing with the screen off, and tag the
         // stream as media so the system routes/ducks it correctly.
         p.setWakeMode(applicationContext, PowerManager.PARTIAL_WAKE_LOCK)
@@ -492,6 +680,7 @@ class PlayerService : Service() {
             it.setVolume(volume * volume, volume * volume)
             requestFocus()
             it.start()
+            applyPlaybackParams(it)
             if (seekOnPrepare > 0) runCatching { it.seekTo(seekOnPrepare) }
             // Promote to a started foreground service so playback + the
             // shade controls survive the activity going away
@@ -611,6 +800,7 @@ class PlayerService : Service() {
 
     private fun releasePlayer() {
         prepared = false
+        releaseFx()
         mp?.let { p -> runCatching { p.stop() }; runCatching { p.release() } }
         mp = null
     }
@@ -717,6 +907,8 @@ class PlayerService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         saveState()
+        main.removeCallbacks(sleepRunnable)
+        main.removeCallbacks(loopChecker)
         stopForeground(STOP_FOREGROUND_REMOVE)
         releasePlayer()
         runCatching { unregisterReceiver(noisyReceiver) }
