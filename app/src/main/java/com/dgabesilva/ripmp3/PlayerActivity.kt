@@ -311,12 +311,20 @@ class PlayerActivity : AppCompatActivity(), DownloadEngine.Listener {
     private fun showMenu(anchor: View) {
         val panel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = getDrawable(R.drawable.bevel_raised)
             val p = (5 * density).toInt()
             setPadding(p, p, p, p)
             minimumWidth = (210 * density).toInt()
         }
-        val popup = PopupWindow(panel, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, true)
+        // The menu has enough entries to be taller than the screen, so it lives
+        // in a ScrollView capped to a fraction of the screen height — otherwise
+        // the bottom items (e.g. ORGANIZE LIBRARY) get clipped off and can't be
+        // reached at all.
+        val scroll = ScrollView(this).apply {
+            background = getDrawable(R.drawable.bevel_raised)
+            isVerticalScrollBarEnabled = true
+            addView(panel)
+        }
+        val popup = PopupWindow(scroll, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, true)
         popup.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
         popup.elevation = 12f
 
@@ -370,6 +378,14 @@ class PlayerActivity : AppCompatActivity(), DownloadEngine.Listener {
         }
         item("🗂 ORGANIZE LIBRARY") { organizeDialog() }
 
+        // Cap the popup to ~72% of the screen; if the menu is taller, the
+        // ScrollView takes over so every item stays reachable.
+        scroll.measure(
+            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
+            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+        )
+        val maxH = (resources.displayMetrics.heightPixels * 0.72f).toInt()
+        if (scroll.measuredHeight > maxH) popup.height = maxH
         popup.showAsDropDown(anchor, 0, (4 * density).toInt())
     }
 
