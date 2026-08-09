@@ -42,6 +42,11 @@ dependencies {
     implementation("com.google.android.material:material:1.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
+    // ExoPlayer (Media3) — gapless playback engine + built-in audio focus,
+    // becoming-noisy handling, and wake locks
+    implementation("androidx.media3:media3-exoplayer:1.4.1")
+    implementation("androidx.media3:media3-common:1.4.1")
+
     // yt-dlp + ffmpeg for Android (JunkFood02 fork, Maven Central)
     implementation("io.github.junkfood02.youtubedl-android:library:0.17.2")
     implementation("io.github.junkfood02.youtubedl-android:ffmpeg:0.17.2")

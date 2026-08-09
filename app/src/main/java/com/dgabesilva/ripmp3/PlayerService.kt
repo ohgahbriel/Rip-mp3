@@ -6,23 +6,17 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
-import android.content.BroadcastReceiver
-import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.net.Uri
 import android.provider.MediaStore
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.drawable.Icon
-import android.media.AudioAttributes
-import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.media.MediaMetadata
 import android.media.MediaMetadataRetriever
-import android.media.MediaPlayer
-import android.media.PlaybackParams
 import android.media.audiofx.BassBoost
 import android.media.audiofx.Equalizer
 import android.media.session.MediaSession
@@ -32,18 +26,28 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
-import android.os.PowerManager
-import androidx.core.content.ContextCompat
+import androidx.annotation.OptIn
+import androidx.media3.common.AudioAttributes
+import androidx.media3.common.C
+import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.PlaybackParameters
+import androidx.media3.common.Player
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.ExoPlayer
 import java.io.File
 import java.util.Locale
 import kotlin.concurrent.thread
-import kotlin.random.Random
 
 /**
- * Foreground playback service: keeps music going while the app is backgrounded
- * and puts prev / play-pause / next controls in the notification shade
- * (pull down the status bar to drive the player from anywhere).
+ * Foreground playback service. The audio engine is ExoPlayer (Media3): it holds
+ * the whole queue as media items so consecutive tracks play GAPLESS, and it owns
+ * audio focus, "becoming noisy" (headphone-unplug) handling, and the playback
+ * wake lock. We keep our own framework MediaSession + notification so the shade
+ * / lock-screen / Bluetooth controls, and the direct-binding activities, are
+ * unchanged. State changes are driven off a single [Player.Listener].
  */
+@OptIn(UnstableApi::class)
 class PlayerService : Service() {
 
     data class Track(
@@ -66,101 +70,62 @@ class PlayerService : Service() {
     override fun onBind(intent: Intent?): IBinder = binder
 
     val library = mutableListOf<Track>()   // every song found on the device
-    val tracks = mutableListOf<Track>()    // active play queue (what the playlist editor shows)
+    val tracks = mutableListOf<Track>()    // active play queue; kept in lockstep with the player's media items
     var queueName = "LIBRARY"; private set
     var current = -1; private set
-    var shuffle = false
-    var repeatAll = false
+
+    // Shuffle / repeat are backed by ExoPlayer; the fields are the source of
+    // truth for persistence and are applied to the player whenever they change.
+    private var _shuffle = false
+    var shuffle: Boolean
+        get() = _shuffle
+        set(v) { _shuffle = v; player?.shuffleModeEnabled = v; saveState() }
+    private var _repeatAll = false
+    var repeatAll: Boolean
+        get() = _repeatAll
+        set(v) { _repeatAll = v; player?.repeatMode = if (v) Player.REPEAT_MODE_ALL else Player.REPEAT_MODE_OFF; saveState() }
+
     var listener: Listener? = null
     var volume = 0.8f
         set(value) {
             field = value
-            runCatching { mp?.setVolume(value * value, value * value) }
+            runCatching { player?.volume = value * value }   // perceptual taper
         }
 
-    private var mp: MediaPlayer? = null
-    private var prepared = false
+    private var player: ExoPlayer? = null
+    private var audioSessionId = 0
     private var session: MediaSession? = null
     private val main = Handler(Looper.getMainLooper())
-
-    // ---------- Audio focus / output routing ----------
     private val audioManager by lazy { getSystemService(AUDIO_SERVICE) as AudioManager }
-    private var focusRequest: AudioFocusRequest? = null
-    private var resumeOnFocusGain = false   // true only after a *transient* loss we should recover from
-    private var ducked = false
-
-    private val audioAttributes: AudioAttributes by lazy {
-        AudioAttributes.Builder()
-            .setUsage(AudioAttributes.USAGE_MEDIA)
-            .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-            .build()
-    }
 
     // Cached decode of the current file's embedded cover, so setMetadata (called
-    // on every state change) doesn't re-read the file each time — only when the
-    // track actually changes.
+    // on every state change) doesn't re-read the file each time.
     private var artCache: Pair<String, Bitmap?>? = null
 
-    // ---------- Resume + smart shuffle ----------
-    // Restored-session resume point: only honored when play() is asked for
-    // exactly [resumeIndex], so tapping a *different* track after a restore
-    // starts it from 0 rather than inheriting the saved position.
-    private var resumeIndex = -1
-    private var resumePositionMs = 0
+    // ---------- Resume ----------
     private var sessionRestored = false
-    // Shuffle as a bag of not-yet-played indices + a back-stack, instead of a
-    // bare random pick that can replay a song two tracks later.
-    private var shuffleBag = mutableListOf<Int>()
-    private val shuffleHistory = ArrayDeque<Int>()
 
     // ---------- Audio effects / speed / sleep / A-B loop ----------
     private var eq: Equalizer? = null
     private var bass: BassBoost? = null
-    // Device EQ capabilities, probed once (0 bands = EQ unsupported here).
     var eqBandCount = 0; private set
     var eqMinLevel: Short = -1500; private set
     var eqMaxLevel: Short = 1500; private set
     private val eqCenterFreqs = mutableListOf<Int>()   // Hz per band
     val eqPresetNames = mutableListOf<String>()
-    // Persisted user FX state.
     var fxEnabled = false; private set
     private var eqLevels = ShortArray(0)               // millibel per band
     var bassStrength = 0; private set                  // 0..1000
     var speed = 1f; private set
     var pitch = 1f; private set
-    // Sleep timer + A-B loop.
     private var sleepEndMs = 0L
     var loopA = -1; private set
     var loopB = -1; private set
 
-    private val focusListener = AudioManager.OnAudioFocusChangeListener { change ->
-        when (change) {
-            // Someone took focus for good (another music app) — stop and don't
-            // silently resume over them later.
-            AudioManager.AUDIOFOCUS_LOSS -> { resumeOnFocusGain = false; pause() }
-            // A phone call / transient sound — pause, but remember to pick back
-            // up if we were playing.
-            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> { resumeOnFocusGain = isPlaying; pause() }
-            // A nav prompt / notification — duck instead of pausing.
-            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> { ducked = true; applyDuck() }
-            AudioManager.AUDIOFOCUS_GAIN -> {
-                if (ducked) { ducked = false; applyDuck() }
-                if (resumeOnFocusGain) { resumeOnFocusGain = false; resume() }
-            }
-        }
-    }
-
-    // Headphones unplugged / bluetooth disconnected: pause instead of blasting
-    // the track out of the phone speaker.
-    private val noisyReceiver = object : BroadcastReceiver() {
-        override fun onReceive(c: Context?, i: Intent?) {
-            if (i?.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY) pause()
-        }
-    }
-
-    val isPlaying get() = prepared && runCatching { mp?.isPlaying == true }.getOrDefault(false)
-    val positionMs get() = if (prepared) runCatching { mp?.currentPosition ?: 0 }.getOrDefault(0) else 0
-    val durationMs get() = if (prepared) runCatching { mp?.duration ?: 0 }.getOrDefault(0) else 0
+    val isPlaying get() = player?.isPlaying == true
+    val positionMs get() = (player?.currentPosition ?: 0L).toInt().coerceAtLeast(0)
+    val durationMs get() =
+        player?.duration?.takeIf { it != C.TIME_UNSET }?.toInt()?.coerceAtLeast(0) ?: (currentTrack?.durationMs ?: 0)
     val currentTrack get() = tracks.getOrNull(current)
 
     companion object {
@@ -170,6 +135,51 @@ class PlayerService : Service() {
         const val ACT_PLAYPAUSE = "com.dgabesilva.ripmp3.PLAYPAUSE"
         const val ACT_NEXT = "com.dgabesilva.ripmp3.NEXT"
         const val ACT_SHUTDOWN = "com.dgabesilva.ripmp3.SHUTDOWN"
+    }
+
+    // ---------- Player callbacks ----------
+
+    private val playerListener = object : Player.Listener {
+        override fun onMediaItemTransition(item: MediaItem?, reason: Int) {
+            val idx = player?.currentMediaItemIndex ?: -1
+            current = if (idx in tracks.indices) idx else -1
+            clearLoop() // A-B loop is per-track
+            val t = currentTrack
+            listener?.onTrackChanged(current, t)
+            // Count a play only when we're actually going to play it (not on the
+            // paused restore/setMediaItems that also fires this callback).
+            if (player?.playWhenReady == true) t?.let { recordPlay(it) }
+            updateSession(if (isPlaying) PlaybackState.STATE_PLAYING else PlaybackState.STATE_PAUSED)
+            refreshNotification()
+            saveState()
+        }
+
+        override fun onIsPlayingChanged(playing: Boolean) {
+            if (playing) {
+                startService(Intent(this@PlayerService, PlayerService::class.java))
+                updateSession(PlaybackState.STATE_PLAYING)
+                goForeground()
+            } else {
+                updateSession(PlaybackState.STATE_PAUSED)
+                notifyPaused()
+            }
+            listener?.onPlayState(playing)
+            saveState()
+        }
+
+        override fun onPlaybackStateChanged(state: Int) {
+            if (state == Player.STATE_ENDED) {
+                updateSession(PlaybackState.STATE_STOPPED)
+                notifyPaused()
+                listener?.onPlayState(false)
+                saveState()
+            }
+        }
+
+        override fun onPlayerError(error: PlaybackException) {
+            // A bad/missing file — skip to the next rather than wedging.
+            player?.let { if (it.hasNextMediaItem()) it.seekToNextMediaItem() }
+        }
     }
 
     override fun onCreate() {
@@ -191,46 +201,57 @@ class PlayerService : Service() {
             })
             isActive = true
         }
-        ContextCompat.registerReceiver(
-            this, noisyReceiver,
-            IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY),
-            ContextCompat.RECEIVER_NOT_EXPORTED
-        )
+
         probeFxCaps()
         loadFxState()
+
+        // Build the engine. ExoPlayer manages focus + becoming-noisy + wakelock.
+        audioSessionId = runCatching { audioManager.generateAudioSessionId() }.getOrDefault(0)
+        player = ExoPlayer.Builder(this).build().apply {
+            setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(C.USAGE_MEDIA)
+                    .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
+                    .build(),
+                /* handleAudioFocus = */ true
+            )
+            setHandleAudioBecomingNoisy(true)
+            setWakeMode(C.WAKE_MODE_LOCAL)
+            if (audioSessionId != 0) runCatching { setAudioSessionId(audioSessionId) }
+            volume = this@PlayerService.volume * this@PlayerService.volume
+            setPlaybackParameters(PlaybackParameters(speed, pitch))
+            addListener(playerListener)
+        }
+        if (fxEnabled && audioSessionId != 0) attachFx(audioSessionId)
+
         loadTracks()
     }
 
-    // ---------- Audio focus helpers ----------
-
-    private fun applyDuck() {
-        val v = if (ducked) volume * 0.3f else volume
-        runCatching { mp?.setVolume(v * v, v * v) }
-    }
-
-    /** Asks the system for playback focus; true if granted. */
-    private fun requestFocus(): Boolean {
-        val res = if (Build.VERSION.SDK_INT >= 26) {
-            val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
-                .setAudioAttributes(audioAttributes)
-                .setOnAudioFocusChangeListener(focusListener)
-                .setWillPauseWhenDucked(false)
-                .build()
-            focusRequest = req
-            audioManager.requestAudioFocus(req)
-        } else {
-            @Suppress("DEPRECATION")
-            audioManager.requestAudioFocus(focusListener, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN)
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        when (intent?.action) {
+            ACT_PREV -> step(-1)
+            ACT_PLAYPAUSE -> if (isPlaying) pause() else resume()
+            ACT_NEXT -> step(+1)
+            ACT_SHUTDOWN -> if (!isPlaying) stopSelf()
         }
-        return res == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+        return START_NOT_STICKY
     }
 
-    private fun abandonFocus() {
-        if (Build.VERSION.SDK_INT >= 26) focusRequest?.let { audioManager.abandonAudioFocusRequest(it) }
-        else @Suppress("DEPRECATION") audioManager.abandonAudioFocus(focusListener)
+    private fun buildMediaItem(t: Track): MediaItem = MediaItem.fromUri(Uri.fromFile(t.file))
+
+    /** Rebuilds the player's playlist from [tracks] (a full reset). Used by whole-queue changes only. */
+    private fun syncPlayerItems(startIndex: Int, startPos: Long, play: Boolean) {
+        val p = player ?: return
+        if (tracks.isEmpty()) { p.clearMediaItems(); current = -1; return }
+        val idx = startIndex.coerceIn(0, tracks.size - 1)
+        p.setMediaItems(tracks.map { buildMediaItem(it) }, idx, startPos)
+        p.prepare()
+        p.playWhenReady = play
+        current = idx
     }
 
-    /** Embedded cover art for [t], decoded once and cached by path. Null when the file has none. */
+    // ---------- Embedded art ----------
+
     private fun albumArt(t: Track): Bitmap? {
         artCache?.let { if (it.first == t.file.absolutePath) return it.second }
         val bmp = runCatching {
@@ -265,7 +286,7 @@ class PlayerService : Service() {
 
     private fun attachFx(sessionId: Int) {
         releaseFx()
-        if (!fxEnabled || eqBandCount == 0) return
+        if (!fxEnabled || eqBandCount == 0 || sessionId == 0) return
         runCatching {
             eq = Equalizer(1, sessionId).apply {
                 enabled = true
@@ -291,7 +312,7 @@ class PlayerService : Service() {
     fun setFxEnabled(on: Boolean) {
         fxEnabled = on
         saveFx()
-        if (on) mp?.audioSessionId?.let { attachFx(it) } else releaseFx()
+        if (on) attachFx(audioSessionId) else releaseFx()
     }
 
     fun setEqBand(band: Int, level: Short) {
@@ -321,24 +342,9 @@ class PlayerService : Service() {
 
     // ---------- Speed / pitch ----------
 
-    private fun applyPlaybackParams(p: MediaPlayer) {
-        if (speed == 1f && pitch == 1f) return
-        runCatching { p.playbackParams = p.playbackParams.setSpeed(speed).setPitch(pitch) }
-    }
-
-    private fun applyLiveParams() {
-        val p = mp ?: return
-        if (!prepared) return
-        runCatching {
-            val wasPlaying = p.isPlaying
-            p.playbackParams = p.playbackParams.setSpeed(speed).setPitch(pitch)
-            // Setting params can (re)start the player; keep the paused state intact.
-            if (!wasPlaying && p.isPlaying) p.pause()
-        }
-    }
-
-    fun setSpeed(v: Float) { speed = v.coerceIn(0.25f, 3f); applyLiveParams(); saveFx() }
-    fun setPitch(v: Float) { pitch = v.coerceIn(0.5f, 2f); applyLiveParams(); saveFx() }
+    fun setSpeed(v: Float) { speed = v.coerceIn(0.25f, 3f); applyParams(); saveFx() }
+    fun setPitch(v: Float) { pitch = v.coerceIn(0.5f, 2f); applyParams(); saveFx() }
+    private fun applyParams() { runCatching { player?.playbackParameters = PlaybackParameters(speed, pitch) } }
 
     private fun saveFx() {
         runCatching {
@@ -407,18 +413,6 @@ class PlayerService : Service() {
         if (loopA >= 0 && loopB > loopA) main.post(loopChecker)
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
-            ACT_PREV -> step(-1)
-            ACT_PLAYPAUSE -> if (isPlaying) pause() else resume()
-            ACT_NEXT -> step(+1)
-            ACT_SHUTDOWN -> if (!isPlaying) stopSelf()
-        }
-        return START_NOT_STICKY
-    }
-
-    // ---------- Library ----------
-
     // ---------- Queue management ----------
 
     fun setQueue(list: List<Track>, name: String, startIndex: Int = -1, autoplay: Boolean = false) {
@@ -426,10 +420,18 @@ class PlayerService : Service() {
         tracks.clear()
         tracks.addAll(list)
         queueName = name
-        current = if (playingFile != null) tracks.indexOfFirst { it.file == playingFile } else -1
-        clearShuffleState()
+        val idx = when {
+            startIndex >= 0 -> startIndex
+            playingFile != null -> tracks.indexOfFirst { it.file == playingFile }.let { if (it >= 0) it else 0 }
+            else -> 0
+        }
+        // Keep playing seamlessly if the current track is still here and we're not
+        // being asked to start somewhere specific; otherwise start fresh.
+        val keepingCurrent = playingFile != null && startIndex < 0 && tracks.getOrNull(idx)?.file == playingFile
+        val startPos = if (keepingCurrent) positionMs.toLong() else 0L
+        val play = autoplay || (keepingCurrent && isPlaying)
+        syncPlayerItems(idx, startPos, play)
         listener?.onTracksReloaded()
-        if (autoplay && tracks.isNotEmpty()) play(if (startIndex >= 0) startIndex else 0)
         saveState()
     }
 
@@ -437,8 +439,11 @@ class PlayerService : Service() {
     fun enqueue(list: List<Track>): Int {
         val have = tracks.mapTo(HashSet()) { it.file.absolutePath }
         val add = list.filter { it.file.absolutePath !in have }
-        tracks.addAll(add)
-        clearShuffleState()
+        if (add.isNotEmpty()) {
+            tracks.addAll(add)
+            player?.addMediaItems(add.map { buildMediaItem(it) })
+            if (player?.playbackState == Player.STATE_IDLE) player?.prepare()
+        }
         listener?.onTracksReloaded()
         saveState()
         return add.size
@@ -448,12 +453,60 @@ class PlayerService : Service() {
     fun enqueueNext(list: List<Track>): Int {
         val have = tracks.mapTo(HashSet()) { it.file.absolutePath }
         val add = list.filter { it.file.absolutePath !in have }
-        val at = (current + 1).coerceIn(0, tracks.size)
-        tracks.addAll(at, add)
-        clearShuffleState()
+        if (add.isNotEmpty()) {
+            val at = (current + 1).coerceIn(0, tracks.size)
+            tracks.addAll(at, add)
+            player?.addMediaItems(at, add.map { buildMediaItem(it) })
+            if (player?.playbackState == Player.STATE_IDLE) player?.prepare()
+            current = player?.currentMediaItemIndex ?: current
+        }
         listener?.onTracksReloaded()
         saveState()
         return add.size
+    }
+
+    /** Removes one track from the queue (not disk) without interrupting the current song. */
+    fun removeFromQueue(index: Int) {
+        if (index !in tracks.indices) return
+        tracks.removeAt(index)
+        runCatching { player?.removeMediaItem(index) }
+        current = player?.currentMediaItemIndex?.takeIf { it in tracks.indices } ?: (if (tracks.isEmpty()) -1 else current.coerceIn(0, tracks.size - 1))
+        listener?.onTracksReloaded()
+        saveState()
+    }
+
+    /** Drag-and-drop reorder: moves the track at [from] to [to], keeping playback going. */
+    fun moveTrack(from: Int, to: Int) {
+        if (from == to || from !in tracks.indices || to !in tracks.indices) return
+        val t = tracks.removeAt(from)
+        tracks.add(to, t)
+        runCatching { player?.moveMediaItem(from, to) }
+        current = player?.currentMediaItemIndex ?: current
+        listener?.onTracksReloaded()
+        saveState()
+    }
+
+    /** Column-header sort: reorders the queue in place, keeping the current song playing. */
+    fun sortTracks(comparator: Comparator<Track>) {
+        val playingFile = currentTrack?.file
+        val wasPlaying = isPlaying
+        val pos = positionMs.toLong()
+        tracks.sortWith(comparator)
+        val idx = if (playingFile != null) tracks.indexOfFirst { it.file == playingFile }.coerceAtLeast(0)
+                  else (player?.currentMediaItemIndex ?: 0)
+        syncPlayerItems(idx, pos, wasPlaying)
+        listener?.onTracksReloaded()
+        saveState()
+    }
+
+    fun newQueue() = setQueue(emptyList(), "NEW LIST")
+
+    fun resetToLibrary() = setQueue(library.toList(), "LIBRARY")
+
+    fun renameQueue(name: String) {
+        queueName = name
+        listener?.onTracksReloaded()
+        saveState()
     }
 
     // ---------- Play stats + delete ----------
@@ -490,57 +543,21 @@ class PlayerService : Service() {
 
     /** Deletes the file from disk and drops it from the queue + library. Returns true on success. */
     fun deleteTrackFile(t: Track): Boolean {
-        val wasCurrent = currentTrack?.file == t.file
         val ok = runCatching { t.file.delete() }.getOrDefault(false)
         if (!ok) return false
         val qi = tracks.indexOfFirst { it.file == t.file }
         if (qi >= 0) {
             tracks.removeAt(qi)
-            when {
-                wasCurrent -> { releasePlayer(); current = -1; listener?.onPlayState(false) }
-                qi < current -> current--
-            }
+            runCatching { player?.removeMediaItem(qi) }
+            current = player?.currentMediaItemIndex?.takeIf { it in tracks.indices } ?: -1
         }
         library.removeAll { it.file == t.file }
-        clearShuffleState()
         listener?.onTracksReloaded()
         saveState()
         runCatching {
             android.media.MediaScannerConnection.scanFile(this, arrayOf(t.file.absolutePath), null, null)
         }
         return true
-    }
-
-    /** Drag-and-drop reorder: moves the track at [from] to [to], keeping playback position stable. */
-    fun moveTrack(from: Int, to: Int) {
-        if (from == to || from !in tracks.indices || to !in tracks.indices) return
-        val playingFile = currentTrack?.file
-        val t = tracks.removeAt(from)
-        tracks.add(to, t)
-        current = if (playingFile != null) tracks.indexOfFirst { it.file == playingFile } else current
-        clearShuffleState()
-        listener?.onTracksReloaded()
-        saveState()
-    }
-
-    /** Column-header sort: reorders the queue in place, keeping playback position stable. */
-    fun sortTracks(comparator: Comparator<Track>) {
-        val playingFile = currentTrack?.file
-        tracks.sortWith(comparator)
-        current = if (playingFile != null) tracks.indexOfFirst { it.file == playingFile } else current
-        clearShuffleState()
-        listener?.onTracksReloaded()
-        saveState()
-    }
-
-    fun newQueue() = setQueue(emptyList(), "NEW LIST")
-
-    fun resetToLibrary() = setQueue(library.toList(), "LIBRARY")
-
-    fun renameQueue(name: String) {
-        queueName = name
-        listener?.onTracksReloaded()
-        saveState()
     }
 
     // ---------- Session persistence (resume where you left off) ----------
@@ -555,17 +572,17 @@ class PlayerService : Service() {
                 .putString("q_paths", tracks.joinToString("\n") { it.file.absolutePath })
                 .putInt("q_index", current)
                 .putInt("q_pos", positionMs)
-                .putBoolean("shuffle", shuffle)
-                .putBoolean("repeat", repeatAll)
+                .putBoolean("shuffle", _shuffle)
+                .putBoolean("repeat", _repeatAll)
                 .apply()
         }
     }
 
     /**
      * Rebuilds the last session's queue from saved file paths (skipping any that
-     * no longer exist) and restores index / shuffle / repeat, leaving
-     * [resumeIndex]/[resumePositionMs] set so the saved position is honored on the next play.
-     * Does NOT auto-play — just makes the app reopen exactly where it was.
+     * no longer exist), loads it into the player PAUSED at the saved position,
+     * and restores index / shuffle / repeat — so the app reopens exactly where
+     * it was without auto-playing.
      */
     private fun restoreSavedSession(lib: List<Track>): Boolean {
         val p = statePrefs()
@@ -580,11 +597,8 @@ class PlayerService : Service() {
         queueName = p.getString("q_name", "LIBRARY") ?: "LIBRARY"
         shuffle = p.getBoolean("shuffle", false)
         repeatAll = p.getBoolean("repeat", false)
-        val idx = p.getInt("q_index", -1)
-        current = if (idx in tracks.indices) idx else -1
-        resumeIndex = current
-        resumePositionMs = p.getInt("q_pos", 0).coerceAtLeast(0)
-        clearShuffleState()
+        val idx = p.getInt("q_index", -1).let { if (it in tracks.indices) it else 0 }
+        syncPlayerItems(idx, p.getInt("q_pos", 0).coerceAtLeast(0).toLong(), play = false)
         currentTrack?.let { listener?.onTrackChanged(current, it) }
         return true
     }
@@ -668,28 +682,26 @@ class PlayerService : Service() {
             main.post {
                 library.clear()
                 library.addAll(list)
-                // First scan after launch: try to reopen the last session. If
-                // there's nothing saved (or none of it survives), fall through
-                // to the default whole-library queue.
+                // First scan after launch: reopen the last session (or default to
+                // the whole library). Later rescans only touch the LIBRARY queue
+                // while nothing is playing, so a background download-rescan never
+                // interrupts the current song.
                 val didRestore = if (!sessionRestored) {
                     sessionRestored = true
                     restoreSavedSession(list)
                 } else false
-                if (!didRestore && queueName == "LIBRARY") {
-                    val playingFile = currentTrack?.file
+                if (!didRestore && queueName == "LIBRARY" && !isPlaying) {
                     tracks.clear()
                     tracks.addAll(list)
-                    current = if (playingFile != null) tracks.indexOfFirst { it.file == playingFile } else -1
+                    val idx = current.coerceIn(0, maxOf(0, tracks.size - 1))
+                    syncPlayerItems(idx, 0, false)
                 }
                 listener?.onTracksReloaded()
             }
 
-            // Fill anything MediaStore didn't give us straight from the file's
-            // own tags: duration always (some rows report 0), and genre on the
-            // devices/files the GENRE column above couldn't cover (API < 30, or
-            // a file MediaStore never tagged). Both come from a single
-            // retriever open per track, and only when actually missing, so this
-            // stays a one-time cost that skips already-complete tracks.
+            // Fill anything MediaStore didn't give us straight from the file's own
+            // tags: duration always (some rows report 0), and genre on the
+            // devices/files the GENRE column couldn't cover.
             list.forEachIndexed { i, t ->
                 val needDur = t.durationMs == 0
                 val needGenre = t.genre == "Unknown Genre"
@@ -722,158 +734,51 @@ class PlayerService : Service() {
     // ---------- Transport ----------
 
     fun play(index: Int) {
+        val p = player ?: return
         if (tracks.isEmpty()) return
         val idx = index.coerceIn(0, tracks.size - 1)
-        // Resume point applies only to the exact track we saved it for.
-        val seekOnPrepare = if (idx == resumeIndex) resumePositionMs else 0
-        resumeIndex = -1; resumePositionMs = 0
-        clearLoop()   // A-B loop is per-track; a new track starts fresh
-        releasePlayer()
-        current = idx
-        val t = tracks[idx]
-        listener?.onTrackChanged(idx, t)
-
-        val p = MediaPlayer()
-        mp = p
-        attachFx(p.audioSessionId)
-        // Keep the CPU alive while playing with the screen off, and tag the
-        // stream as media so the system routes/ducks it correctly.
-        p.setWakeMode(applicationContext, PowerManager.PARTIAL_WAKE_LOCK)
-        runCatching { p.setAudioAttributes(audioAttributes) }
-        p.setOnPreparedListener {
-            prepared = true
-            if (t.durationMs == 0) t.durationMs = it.duration
-            ducked = false
-            it.setVolume(volume * volume, volume * volume)
-            requestFocus()
-            it.start()
-            applyPlaybackParams(it)
-            recordPlay(t)
-            if (seekOnPrepare > 0) runCatching { it.seekTo(seekOnPrepare) }
-            // Promote to a started foreground service so playback + the
-            // shade controls survive the activity going away
-            startService(Intent(this, PlayerService::class.java))
-            updateSession(PlaybackState.STATE_PLAYING)
-            goForeground()
-            listener?.onPlayState(true)
-            saveState()
-        }
-        p.setOnCompletionListener { onTrackEnd() }
-        p.setOnErrorListener { _, _, _ ->
-            prepared = false
-            listener?.onPlayState(false)
-            true
-        }
-        try {
-            p.setDataSource(t.file.absolutePath)
-            p.prepareAsync()
-        } catch (e: Exception) {
-            listener?.onPlayState(false)
-        }
+        clearLoop()
+        if (p.mediaItemCount != tracks.size) syncPlayerItems(idx, 0, false)
+        if (p.playbackState == Player.STATE_IDLE) p.prepare()
+        p.seekTo(idx, 0)
+        p.playWhenReady = true
     }
 
     fun resume() {
-        val p = mp
-        if (p == null || !prepared) {
-            if (current >= 0) play(current) else if (tracks.isNotEmpty()) play(0)
-            return
-        }
-        if (!p.isPlaying) {
-            ducked = false
-            requestFocus()
-            runCatching { p.start() }
-            updateSession(PlaybackState.STATE_PLAYING)
-            goForeground()
-            listener?.onPlayState(true)
-        }
+        val p = player ?: return
+        if (tracks.isEmpty()) return
+        if (p.mediaItemCount == 0) syncPlayerItems(current.coerceAtLeast(0), 0, false)
+        if (p.playbackState == Player.STATE_IDLE) p.prepare()
+        if (p.currentMediaItemIndex == C.INDEX_UNSET) p.seekTo(current.coerceAtLeast(0), 0)
+        p.playWhenReady = true
     }
 
-    fun pause() {
-        val p = mp ?: return
-        if (prepared && runCatching { p.isPlaying }.getOrDefault(false)) {
-            runCatching { p.pause() }
-            updateSession(PlaybackState.STATE_PAUSED)
-            notifyPaused()
-            listener?.onPlayState(false)
-            saveState()
-        }
-    }
+    fun pause() { player?.playWhenReady = false }
 
     fun stopToZero() {
-        val p = mp ?: return
-        if (prepared) runCatching {
-            p.pause()
-            p.seekTo(0)
+        player?.let {
+            it.playWhenReady = false
+            it.seekTo(it.currentMediaItemIndex.coerceAtLeast(0), 0)
         }
-        updateSession(PlaybackState.STATE_STOPPED)
-        notifyPaused()
-        listener?.onPlayState(false)
-        saveState()
     }
 
     fun step(dir: Int) {
+        val p = player ?: return
         if (tracks.isEmpty()) return
-        val next = nextIndex(dir) ?: return
-        play(next)
+        if (dir > 0) p.seekToNextMediaItem() else p.seekToPreviousMediaItem()
     }
 
     fun seekTo(ms: Int) {
-        if (prepared) runCatching { mp?.seekTo(ms) }
-        updateSession(if (isPlaying) PlaybackState.STATE_PLAYING else PlaybackState.STATE_PAUSED)
+        player?.seekTo(ms.toLong().coerceAtLeast(0))
         saveState()
     }
 
-    private fun onTrackEnd() {
-        val next = nextIndex(+1)
-        if (next != null) play(next)
-        else {
-            updateSession(PlaybackState.STATE_STOPPED)
-            notifyPaused()
-            listener?.onPlayState(false)
-        }
-    }
-
-    private fun nextIndex(dir: Int): Int? {
-        if (tracks.isEmpty()) return null
-        if (shuffle && tracks.size > 1) {
-            if (dir < 0) {
-                // Prev walks back through the actual play history, not a fresh random.
-                val prev = shuffleHistory.removeLastOrNull()
-                return prev?.takeIf { it in tracks.indices } ?: current
-            }
-            if (current in tracks.indices) {
-                shuffleHistory.addLast(current)
-                while (shuffleHistory.size > tracks.size) shuffleHistory.removeFirst()
-            }
-            if (shuffleBag.isEmpty()) {
-                // New cycle: every other track once, in a fresh random order.
-                shuffleBag = tracks.indices.filter { it != current }.shuffled(Random).toMutableList()
-                if (shuffleBag.isEmpty()) shuffleBag.add(current)
-            }
-            return shuffleBag.removeAt(0)
-        }
-        val n = current + dir
-        return when {
-            n in tracks.indices -> n
-            repeatAll -> (n + tracks.size) % tracks.size
-            else -> null
-        }
-    }
-
-    /** Queue changed under us — drop stale shuffle indices so the next pick refills cleanly. */
-    private fun clearShuffleState() {
-        shuffleBag.clear()
-        shuffleHistory.clear()
-    }
-
-    private fun releasePlayer() {
-        prepared = false
-        releaseFx()
-        mp?.let { p -> runCatching { p.stop() }; runCatching { p.release() } }
-        mp = null
-    }
-
     // ---------- Session + notification ----------
+
+    private fun refreshNotification() {
+        if (isPlaying) goForeground()
+        else runCatching { getSystemService(NotificationManager::class.java).notify(NOTIF_ID, buildNotification()) }
+    }
 
     private fun updateSession(state: Int) {
         session?.setPlaybackState(
@@ -884,7 +789,7 @@ class PlayerService : Service() {
                     PlaybackState.ACTION_SKIP_TO_PREVIOUS or PlaybackState.ACTION_SEEK_TO or
                     PlaybackState.ACTION_STOP
                 )
-                .setState(state, positionMs.toLong(), if (state == PlaybackState.STATE_PLAYING) 1f else 0f)
+                .setState(state, positionMs.toLong(), if (state == PlaybackState.STATE_PLAYING) speed else 0f)
                 .build()
         )
         currentTrack?.let {
@@ -978,9 +883,9 @@ class PlayerService : Service() {
         main.removeCallbacks(sleepRunnable)
         main.removeCallbacks(loopChecker)
         stopForeground(STOP_FOREGROUND_REMOVE)
-        releasePlayer()
-        runCatching { unregisterReceiver(noisyReceiver) }
-        abandonFocus()
+        releaseFx()
+        player?.release()
+        player = null
         session?.release()
         session = null
     }

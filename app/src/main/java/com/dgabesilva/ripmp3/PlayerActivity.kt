@@ -1002,11 +1002,7 @@ class PlayerActivity : AppCompatActivity(), DownloadEngine.Listener {
                         "✎ EDIT TAGS / RENAME" to { openTagEditor(t) },
                         "✕ REMOVE FROM QUEUE" to {
                             val i = s.tracks.indexOfFirst { it.file == t.file }
-                            if (i >= 0) {
-                                val newList = s.tracks.toMutableList().also { it.removeAt(i) }
-                                s.setQueue(newList, s.queueName)
-                                flashMarquee("REMOVED: ${t.title}")
-                            }
+                            if (i >= 0) { s.removeFromQueue(i); flashMarquee("REMOVED: ${t.title}") }
                         },
                         "🗑 DELETE FILE" to { confirmDeleteFile(t) },
                     ))
