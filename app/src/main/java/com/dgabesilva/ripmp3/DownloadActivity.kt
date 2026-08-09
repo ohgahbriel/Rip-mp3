@@ -3,9 +3,16 @@ package com.dgabesilva.ripmp3
 import android.content.Intent
 import android.os.Bundle
 import android.view.View
+import android.view.ViewGroup
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputMethodManager
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
 import com.dgabesilva.ripmp3.databinding.ActivityDownloadBinding
+import kotlinx.coroutines.*
+import java.util.Locale
 
 class DownloadActivity : AppCompatActivity(), DownloadEngine.Listener {
 
@@ -13,6 +20,9 @@ class DownloadActivity : AppCompatActivity(), DownloadEngine.Listener {
     private lateinit var chips: List<TextView>
     private var format = "mp3"
     private var bitrate = "0" // best VBR
+    private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+    private val results = mutableListOf<DownloadEngine.SearchResult>()
+    private lateinit var resultsAdapter: ResultsAdapter
 
     override fun onCreate(savedInstanceState: Bundle?) {
         Skin.apply(this)
@@ -34,7 +44,16 @@ class DownloadActivity : AppCompatActivity(), DownloadEngine.Listener {
         b.chipFlac.setOnClickListener { pickChip(3, "flac", "0") }
         pickChip(0, "mp3", "0")
 
-        b.downloadBtn.setOnClickListener { startDownload() }
+        resultsAdapter = ResultsAdapter()
+        b.resultsList.layoutManager = LinearLayoutManager(this)
+        b.resultsList.adapter = resultsAdapter
+
+        b.searchBtn.setOnClickListener { performSearch() }
+        b.searchInput.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == EditorInfo.IME_ACTION_SEARCH) { performSearch(); true } else false
+        }
+
+        b.downloadBtn.setOnClickListener { startDownload(b.urlInput.text.toString().trim()) }
         b.cancelBtn.setOnClickListener { DownloadEngine.cancel() }
         b.backBtn.setOnClickListener {
             // Opened via Share? There's no player behind us — launch it.
@@ -54,8 +73,29 @@ class DownloadActivity : AppCompatActivity(), DownloadEngine.Listener {
         }
     }
 
-    private fun startDownload() {
-        val url = b.urlInput.text.toString().trim()
+    private fun performSearch() {
+        val q = b.searchInput.text.toString().trim()
+        if (q.isEmpty()) return
+        (getSystemService(INPUT_METHOD_SERVICE) as? InputMethodManager)
+            ?.hideSoftInputFromWindow(b.searchInput.windowToken, 0)
+        onDownloadStatus(DownloadEngine.Status("Searching “$q”…", -1, running = false))
+        results.clear()
+        resultsAdapter.notifyDataSetChanged()
+        scope.launch {
+            val found = DownloadEngine.search(q)
+            results.clear()
+            results.addAll(found)
+            resultsAdapter.notifyDataSetChanged()
+            onDownloadStatus(
+                DownloadEngine.Status(
+                    if (found.isEmpty()) "No results (or yt-dlp still starting up)." else "${found.size} results — tap one to download.",
+                    -1, running = false, error = found.isEmpty()
+                )
+            )
+        }
+    }
+
+    private fun startDownload(url: String) {
         if (!url.startsWith("http")) {
             onDownloadStatus(DownloadEngine.Status("Paste a valid URL first.", -1, running = false, error = true))
             return
@@ -77,8 +117,39 @@ class DownloadActivity : AppCompatActivity(), DownloadEngine.Listener {
         }
     }
 
+    private fun fmtDur(sec: Int): String =
+        if (sec <= 0) "-:--" else String.format(Locale.US, "%d:%02d", sec / 60, sec % 60)
+
+    private inner class ResultsAdapter : RecyclerView.Adapter<ResultsAdapter.VH>() {
+        inner class VH(v: View) : RecyclerView.ViewHolder(v) {
+            val handle: TextView = v.findViewById(R.id.dragHandle)
+            val title: TextView = v.findViewById(R.id.trackTitle)
+            val secondary: TextView = v.findViewById(R.id.trackSecondary)
+            val dur: TextView = v.findViewById(R.id.trackDur)
+        }
+
+        override fun getItemCount() = results.size
+
+        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH =
+            VH(layoutInflater.inflate(R.layout.playlist_item, parent, false)).also {
+                it.handle.visibility = View.GONE
+            }
+
+        override fun onBindViewHolder(holder: VH, position: Int) {
+            val r = results[position]
+            holder.title.text = r.title
+            holder.secondary.text = r.uploader
+            holder.dur.text = fmtDur(r.durationSec)
+            holder.itemView.setOnClickListener {
+                b.urlInput.setText(r.url)
+                startDownload(r.url)
+            }
+        }
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         DownloadEngine.removeListener(this)
+        scope.cancel()
     }
 }

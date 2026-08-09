@@ -6,6 +6,7 @@ import com.yausername.ffmpeg.FFmpeg
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLRequest
 import kotlinx.coroutines.*
+import org.json.JSONObject
 import java.io.File
 
 /**
@@ -63,6 +64,44 @@ object DownloadEngine {
         YoutubeDL.getInstance().destroyProcessById(PROCESS_ID)
         job?.cancel()
         post(Status("Cancelled.", -1, running = false))
+    }
+
+    data class SearchResult(val id: String, val title: String, val durationSec: Int, val uploader: String) {
+        val url get() = "https://www.youtube.com/watch?v=$id"
+    }
+
+    /**
+     * Searches YouTube via yt-dlp's `ytsearch` and returns lightweight results
+     * WITHOUT downloading anything (`--flat-playlist -j` dumps one JSON object
+     * per hit). Best-effort — empty list on any failure. Must run off the main
+     * thread; call after [init].
+     */
+    suspend fun search(query: String, count: Int = 15): List<SearchResult> = withContext(Dispatchers.IO) {
+        val out = mutableListOf<SearchResult>()
+        runCatching {
+            val req = YoutubeDLRequest("ytsearch$count:$query").apply {
+                addOption("--flat-playlist")
+                addOption("-j")
+                addOption("--no-warnings")
+            }
+            val resp = YoutubeDL.getInstance().execute(req, null, null)
+            resp.out.lineSequence().forEach { line ->
+                val t = line.trim()
+                if (t.startsWith("{")) runCatching {
+                    val o = JSONObject(t)
+                    val id = o.optString("id")
+                    if (id.isNotBlank()) out.add(
+                        SearchResult(
+                            id,
+                            o.optString("title", id),
+                            o.optDouble("duration", 0.0).toInt(),
+                            o.optString("uploader", o.optString("channel", ""))
+                        )
+                    )
+                }
+            }
+        }
+        out
     }
 
     /** [format] is "mp3" or "flac"; [bitrate] only applies to mp3 ("0" = best VBR). */
