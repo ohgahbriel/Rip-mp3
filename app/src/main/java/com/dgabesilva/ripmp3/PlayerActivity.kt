@@ -50,6 +50,11 @@ class PlayerActivity : AppCompatActivity(), DownloadEngine.Listener {
     private var userSeeking = false
     private val density by lazy { resources.displayMetrics.density }
 
+    // Lyrics: fetched once per track (kept in memory), plus the active-line
+    // ticker that runs only while the lyrics dialog is open.
+    private val lyricsCache = HashMap<String, Lyrics.Result>()
+    private var lyricsUpdater: Runnable? = null
+
     // ---------- Search filter ----------
     // Filters the queue view only (title/artist substring match); the
     // underlying queue itself is untouched. Manual drag-reorder is disabled
@@ -348,6 +353,7 @@ class PlayerActivity : AppCompatActivity(), DownloadEngine.Listener {
         item("🎚 EQUALIZER") { equalizerDialog() }
         item("🐢 SPEED / PITCH") { speedDialog() }
         item("🔁 A-B LOOP") { loopDialog() }
+        item("🎤 LYRICS") { lyricsDialog() }
         item("⏱ SLEEP TIMER") { sleepDialog() }
         sep()
         item("◨ SKINS") { skinsDialog() }
@@ -685,6 +691,102 @@ class PlayerActivity : AppCompatActivity(), DownloadEngine.Listener {
         }
     }
 
+    private fun lyricsDialog() {
+        val t = svc?.currentTrack ?: run { flashMarquee("NOTHING PLAYING"); return }
+        waDialog("LYRICS") { root, dialog ->
+            val info = TextView(this).apply {
+                text = "SEARCHING LYRICS…"
+                setTextColor(skinColor(R.attr.skinText))
+                textSize = 10f
+                typeface = Typeface.MONOSPACE
+                letterSpacing = 0.1f
+                setPadding(0, 0, 0, (6 * density).toInt())
+            }
+            root.addView(info)
+
+            val container = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            val scroll = ScrollView(this).apply {
+                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, (360 * density).toInt())
+                background = getDrawable(R.drawable.lcd_sunken)
+                setPadding((8 * density).toInt(), (6 * density).toInt(), (8 * density).toInt(), (6 * density).toInt())
+                addView(container)
+            }
+            root.addView(scroll)
+            root.addView(dialogButton("CLOSE") { dialog.dismiss() }.apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, (38 * density).toInt()
+                ).apply { topMargin = (10 * density).toInt() }
+            })
+
+            dialog.setOnDismissListener {
+                lyricsUpdater?.let { ui.removeCallbacks(it) }
+                lyricsUpdater = null
+            }
+
+            fun render(res: Lyrics.Result) {
+                container.removeAllViews()
+                val synced = res.synced
+                when {
+                    res.isEmpty -> info.text = "NO LYRICS FOUND"
+                    !synced.isNullOrEmpty() -> {
+                        info.text = "SYNCED — TAP A LINE TO JUMP"
+                        val lineViews = synced.map { line ->
+                            TextView(this).apply {
+                                text = line.text.ifBlank { "♪" }
+                                setTextColor(skinColor(R.attr.skinText))
+                                textSize = 13f
+                                typeface = Typeface.MONOSPACE
+                                setPadding((4 * density).toInt(), (6 * density).toInt(), (4 * density).toInt(), (6 * density).toInt())
+                                setOnClickListener { svc?.seekTo(line.timeMs) }
+                            }.also { container.addView(it) }
+                        }
+                        val upd = object : Runnable {
+                            override fun run() {
+                                val pos = svc?.positionMs ?: 0
+                                var active = -1
+                                for (i in synced.indices) { if (synced[i].timeMs <= pos) active = i else break }
+                                synced.indices.forEach { i ->
+                                    val on = i == active
+                                    lineViews[i].setTextColor(skinColor(if (on) R.attr.skinAccent else R.attr.skinText))
+                                    lineViews[i].setTypeface(Typeface.MONOSPACE, if (on) Typeface.BOLD else Typeface.NORMAL)
+                                }
+                                if (active >= 0) scroll.smoothScrollTo(0, (lineViews[active].top - scroll.height / 2).coerceAtLeast(0))
+                                ui.postDelayed(this, 350)
+                            }
+                        }
+                        lyricsUpdater = upd
+                        ui.post(upd)
+                    }
+                    else -> {
+                        info.text = "PLAIN LYRICS"
+                        container.addView(TextView(this).apply {
+                            text = res.plain
+                            setTextColor(skinColor(R.attr.skinLcd))
+                            textSize = 13f
+                            typeface = Typeface.MONOSPACE
+                            setPadding((4 * density).toInt(), (4 * density).toInt(), (4 * density).toInt(), (4 * density).toInt())
+                        })
+                    }
+                }
+            }
+
+            val cached = lyricsCache[t.file.absolutePath]
+            if (cached != null) {
+                render(cached)
+            } else {
+                // Placeholder-artist downloads carry "Artist - Title" in the title;
+                // split it so LRCLIB gets a real artist to match on.
+                val (qa, qt) = if (t.artist.isBlank() || t.artist == "Unknown Artist" || t.artist == "RIP DOWNLOADS")
+                    TagCleaner.splitArtistTitle(t.title) else t.artist to t.title
+                scope.launch {
+                    val res = Lyrics.fetch(qa ?: "", qt, (svc?.durationMs ?: t.durationMs) / 1000)
+                    lyricsCache[t.file.absolutePath] = res
+                    if (dialog.isShowing) render(res)
+                }
+            }
+        }
+    }
+
     /** ≡ menu entry: edits the currently-playing track. */
     private fun editTagsDialog() {
         val t = svc?.currentTrack ?: run { flashMarquee("NOTHING PLAYING TO EDIT"); return }
@@ -890,6 +992,7 @@ class PlayerActivity : AppCompatActivity(), DownloadEngine.Listener {
     override fun onDestroy() {
         super.onDestroy()
         ui.removeCallbacks(ticker)
+        lyricsUpdater?.let { ui.removeCallbacks(it) }
         DownloadEngine.removeListener(this)
         svc?.let { if (it.listener === serviceListener) it.listener = null }
         runCatching { unbindService(conn) }
