@@ -368,6 +368,7 @@ class PlayerActivity : AppCompatActivity(), DownloadEngine.Listener {
                 DownloadEngine.cleanupLibrary(this)
             }
         }
+        item("🗂 ORGANIZE LIBRARY") { organizeDialog() }
 
         popup.showAsDropDown(anchor, 0, (4 * density).toInt())
     }
@@ -499,6 +500,117 @@ class PlayerActivity : AppCompatActivity(), DownloadEngine.Listener {
                 Skin.set(this, i)
                 recreate()
             }
+        }
+    }
+
+    // ---------- Organize library ----------
+
+    /** Pick a naming scheme + a scope (whole library or a playlist); tapping a scope opens the preview. */
+    private fun organizeDialog() {
+        val s = svc ?: return
+        waDialog("ORGANIZE LIBRARY") { root, dialog ->
+            var tpl = LibraryOrganizer.Template.ARTIST_TITLE
+            root.addView(dialogLabel("NAMING SCHEME", accent = true))
+            val chips = mutableListOf<TextView>()
+            fun paintChips() = chips.forEachIndexed { i, c ->
+                val on = LibraryOrganizer.Template.values()[i] == tpl
+                c.isSelected = on
+                c.setTextColor(skinColor(if (on) R.attr.skinLcd else R.attr.skinText))
+            }
+            val chipRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            LibraryOrganizer.Template.values().forEach { t ->
+                val c = TextView(this).apply {
+                    text = t.label
+                    gravity = Gravity.CENTER
+                    textSize = 11f
+                    typeface = Typeface.MONOSPACE
+                    background = getDrawable(R.drawable.wa_button)
+                    layoutParams = LinearLayout.LayoutParams(0, (36 * density).toInt(), 1f)
+                        .apply { marginEnd = (4 * density).toInt() }
+                    setOnClickListener { tpl = t; paintChips() }
+                }
+                chips.add(c); chipRow.addView(c)
+            }
+            root.addView(chipRow)
+            paintChips()
+
+            root.addView(dialogLabel("SCOPE — TAP TO PREVIEW", accent = true))
+            fun scopeItem(label: String, tracks: () -> List<PlayerService.Track>) {
+                root.addView(TextView(this).apply {
+                    text = label
+                    setTextColor(skinColor(R.attr.skinLcd))
+                    textSize = 13f
+                    typeface = Typeface.MONOSPACE
+                    background = getDrawable(R.drawable.lcd_sunken)
+                    setPadding((10 * density).toInt(), (9 * density).toInt(), (10 * density).toInt(), (9 * density).toInt())
+                    layoutParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+                    ).apply { bottomMargin = (4 * density).toInt() }
+                    setOnClickListener { dialog.dismiss(); previewOrganizeDialog(tracks(), tpl) }
+                })
+            }
+            scopeItem("♫ WHOLE LIBRARY (${s.library.size})") { s.library.toList() }
+            PlaylistStore.list(this).forEach { name ->
+                scopeItem("▤ $name") { playlistTracks(name) }
+            }
+        }
+    }
+
+    private fun playlistTracks(name: String): List<PlayerService.Track> {
+        val s = svc ?: return emptyList()
+        val byPath = s.library.associateBy { it.file.absolutePath }
+        return PlaylistStore.load(this, name)
+            .map { f -> byPath[f.absolutePath] ?: PlayerService.Track(f, f.nameWithoutExtension) }
+    }
+
+    /** Dry-run: shows every proposed old → new rename before anything is touched. */
+    private fun previewOrganizeDialog(tracks: List<PlayerService.Track>, tpl: LibraryOrganizer.Template) {
+        val plans = LibraryOrganizer.buildPlan(this, tracks, tpl)
+        val writable = plans.filter { it.writable }
+        val skipped = plans.size - writable.size
+        waDialog("PREVIEW") { root, dialog ->
+            root.addView(dialogLabel(
+                if (plans.isEmpty()) "ALREADY ORGANIZED — NOTHING TO RENAME"
+                else "${writable.size} TO RENAME" + if (skipped > 0) " · $skipped SKIPPED (NOT APP FILES)" else "",
+                accent = true
+            ))
+            if (writable.isNotEmpty()) {
+                val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                writable.take(300).forEach { p ->
+                    box.addView(TextView(this).apply {
+                        text = "${p.track.file.nameWithoutExtension}\n→ ${p.newBase}"
+                        setTextColor(skinColor(R.attr.skinLcd))
+                        textSize = 11f
+                        typeface = Typeface.MONOSPACE
+                        setPadding(0, (5 * density).toInt(), 0, (5 * density).toInt())
+                    })
+                }
+                root.addView(ScrollView(this).apply {
+                    layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, (300 * density).toInt())
+                    background = getDrawable(R.drawable.lcd_sunken)
+                    setPadding((8 * density).toInt(), (6 * density).toInt(), (8 * density).toInt(), (6 * density).toInt())
+                    addView(box)
+                })
+            }
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(0, (10 * density).toInt(), 0, 0)
+            }
+            if (writable.isNotEmpty()) {
+                row.addView(dialogButton("APPLY (${writable.size})") {
+                    dialog.dismiss()
+                    flashMarquee("ORGANIZING…")
+                    scope.launch {
+                        val done = LibraryOrganizer.apply(this@PlayerActivity, plans) { d, t ->
+                            if (t > 0 && d % 5 == 0) flashMarquee("ORGANIZING $d/$t…")
+                        }
+                        svc?.loadTracks()
+                        flashMarquee("ORGANIZED $done FILE${if (done == 1) "" else "S"}")
+                    }
+                })
+            }
+            row.addView(dialogButton(if (writable.isEmpty()) "CLOSE" else "CANCEL") { dialog.dismiss() })
+            root.addView(row)
         }
     }
 

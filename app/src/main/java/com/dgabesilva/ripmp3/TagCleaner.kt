@@ -138,6 +138,9 @@ object TagCleaner {
     private fun sanitizeFilename(name: String): String =
         name.replace(Regex("""[\\/:*?"<>|]"""), "_").trim().take(180).ifBlank { "untitled" }
 
+    /** Public filesystem-safe cleaner for callers that build their own base name (e.g. the library organizer). */
+    fun sanitize(name: String): String = sanitizeFilename(name)
+
     private fun uniqueDest(preferred: File, current: File): File {
         if (preferred.absolutePath == current.absolutePath || !preferred.exists()) return preferred
         val base = preferred.nameWithoutExtension
@@ -172,8 +175,13 @@ object TagCleaner {
      */
     suspend fun retagAndRename(
         context: Context, file: File, artist: String?, title: String, genre: String?, artwork: ByteArray? = null,
+        destBaseName: String? = null,
     ): File = withContext(Dispatchers.IO) {
-        val cleanName = sanitizeFilename(if (artist != null) "$artist - $title" else title) + "." + file.extension
+        // The tags written are always the real title/artist; the FILENAME can be
+        // overridden by [destBaseName] (the organizer uses this to apply a chosen
+        // "Artist - Title" vs "Title - Artist" scheme independent of tag content).
+        val base = destBaseName ?: (if (artist != null) "$artist - $title" else title)
+        val cleanName = sanitizeFilename(base) + "." + file.extension
         val dest = uniqueDest(File(file.parentFile, cleanName), current = file)
         val tmp = File(file.parentFile, ".tagtmp_${System.nanoTime()}.${file.extension}")
         val artFile = if (artwork != null) File(file.parentFile, ".tagart_${System.nanoTime()}.jpg") else null
