@@ -22,6 +22,7 @@ import android.widget.LinearLayout
 import android.widget.PopupWindow
 import android.widget.TextView
 import androidx.activity.OnBackPressedCallback
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.recyclerview.widget.ItemTouchHelper
 import androidx.recyclerview.widget.LinearLayoutManager
@@ -40,7 +41,7 @@ import java.util.Locale
  */
 class BrowserActivity : AppCompatActivity() {
 
-    private enum class Mode { ARTISTS, ALBUMS, SONGS, GENRE }
+    private enum class Mode { ARTISTS, ALBUMS, SONGS, GENRE, FOLDER }
 
     private lateinit var b: ActivityBrowserBinding
     private val ui = Handler(Looper.getMainLooper())
@@ -161,6 +162,7 @@ class BrowserActivity : AppCompatActivity() {
         b.tabAlbums.setOnClickListener { switchMode(Mode.ALBUMS) }
         b.tabSongs.setOnClickListener { switchMode(Mode.SONGS) }
         b.tabGenre.setOnClickListener { switchMode(Mode.GENRE) }
+        b.tabFolder.setOnClickListener { switchMode(Mode.FOLDER) }
 
         b.selectBtn.setOnClickListener { enterSelectMode(null) }
         b.selAllBtn.setOnClickListener {
@@ -260,6 +262,7 @@ class BrowserActivity : AppCompatActivity() {
         Mode.ARTISTS -> t.artist.ifBlank { "Unknown Artist" }
         Mode.ALBUMS -> t.album.ifBlank { "Unknown Album" }
         Mode.GENRE -> t.genre.ifBlank { "Unknown Genre" }
+        Mode.FOLDER -> t.file.parentFile?.name ?: "?"
         Mode.SONGS -> ""
     }
 
@@ -305,6 +308,7 @@ class BrowserActivity : AppCompatActivity() {
         styleTab(b.tabAlbums, mode == Mode.ALBUMS)
         styleTab(b.tabSongs, mode == Mode.SONGS)
         styleTab(b.tabGenre, mode == Mode.GENRE)
+        styleTab(b.tabFolder, mode == Mode.FOLDER)
 
         // SONGS: one flat, searchable, sortable list of the whole library —
         // no group level, so it short-circuits the artist/album grouping
@@ -335,6 +339,7 @@ class BrowserActivity : AppCompatActivity() {
             b.crumb.text = when (mode) {
                 Mode.ARTISTS -> "ALL ARTISTS (${groups.size})"
                 Mode.GENRE -> "ALL GENRES (${groups.size})"
+                Mode.FOLDER -> "ALL FOLDERS (${groups.size})"
                 else -> "ALL ALBUMS (${groups.size})"
             }
             b.actionRow.visibility = View.GONE
@@ -465,6 +470,10 @@ class BrowserActivity : AppCompatActivity() {
                 svc?.setQueue(disp, trackListKey() ?: "ALL SONGS", i, autoplay = true)
                 finish()
             },
+            "⏭ PLAY NEXT" to {
+                val added = svc?.enqueueNext(listOf(track)) ?: 0
+                flash(if (added > 0) "PLAYS NEXT: ${track.title}" else "ALREADY IN QUEUE")
+            },
             "✎ EDIT TAGS / RENAME" to {
                 TagEditDialog.show(this, scope, track) {
                     svc?.loadTracks()   // renamed file → rescan; onTracksReloaded rebuilds
@@ -476,7 +485,21 @@ class BrowserActivity : AppCompatActivity() {
                 flash(if (added > 0) "QUEUED: ${track.title}" else "ALREADY IN QUEUE")
             },
             "☑ SELECT (BATCH)" to { enterSelectMode(track) },
+            "🗑 DELETE FILE" to { confirmDelete(track) },
         ))
+    }
+
+    /** Destructive: deletes the file from disk after a confirm, then rescans. */
+    private fun confirmDelete(track: PlayerService.Track) {
+        AlertDialog.Builder(this)
+            .setTitle("Delete file")
+            .setMessage("Delete \"${track.title}\" from this device? This can't be undone.")
+            .setPositiveButton("Delete") { _, _ ->
+                val ok = svc?.deleteTrackFile(track) ?: false
+                flash(if (ok) "DELETED: ${track.title}" else "COULDN'T DELETE FILE")
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     /** Bevel-chrome dropdown menu anchored to [anchor]. */

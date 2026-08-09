@@ -444,6 +444,73 @@ class PlayerService : Service() {
         return add.size
     }
 
+    /** Inserts right after the current track (plays next), skipping dupes. Returns how many were added. */
+    fun enqueueNext(list: List<Track>): Int {
+        val have = tracks.mapTo(HashSet()) { it.file.absolutePath }
+        val add = list.filter { it.file.absolutePath !in have }
+        val at = (current + 1).coerceIn(0, tracks.size)
+        tracks.addAll(at, add)
+        clearShuffleState()
+        listener?.onTracksReloaded()
+        saveState()
+        return add.size
+    }
+
+    // ---------- Play stats + delete ----------
+
+    private fun statsPrefs() = getSharedPreferences("player_stats", MODE_PRIVATE)
+
+    private fun recordPlay(t: Track) {
+        runCatching {
+            val path = t.file.absolutePath
+            statsPrefs().edit()
+                .putInt("c:$path", statsPrefs().getInt("c:$path", 0) + 1)
+                .putLong("t:$path", System.currentTimeMillis())
+                .apply()
+        }
+    }
+
+    /** Library tracks sorted by play count (desc), most-played first. */
+    fun buildMostPlayed(limit: Int = 60): List<Track> {
+        val p = statsPrefs()
+        return library.map { it to p.getInt("c:${it.file.absolutePath}", 0) }
+            .filter { it.second > 0 }
+            .sortedByDescending { it.second }
+            .take(limit).map { it.first }
+    }
+
+    /** Library tracks sorted by last-played time (desc), most recent first. */
+    fun buildRecent(limit: Int = 60): List<Track> {
+        val p = statsPrefs()
+        return library.map { it to p.getLong("t:${it.file.absolutePath}", 0L) }
+            .filter { it.second > 0 }
+            .sortedByDescending { it.second }
+            .take(limit).map { it.first }
+    }
+
+    /** Deletes the file from disk and drops it from the queue + library. Returns true on success. */
+    fun deleteTrackFile(t: Track): Boolean {
+        val wasCurrent = currentTrack?.file == t.file
+        val ok = runCatching { t.file.delete() }.getOrDefault(false)
+        if (!ok) return false
+        val qi = tracks.indexOfFirst { it.file == t.file }
+        if (qi >= 0) {
+            tracks.removeAt(qi)
+            when {
+                wasCurrent -> { releasePlayer(); current = -1; listener?.onPlayState(false) }
+                qi < current -> current--
+            }
+        }
+        library.removeAll { it.file == t.file }
+        clearShuffleState()
+        listener?.onTracksReloaded()
+        saveState()
+        runCatching {
+            android.media.MediaScannerConnection.scanFile(this, arrayOf(t.file.absolutePath), null, null)
+        }
+        return true
+    }
+
     /** Drag-and-drop reorder: moves the track at [from] to [to], keeping playback position stable. */
     fun moveTrack(from: Int, to: Int) {
         if (from == to || from !in tracks.indices || to !in tracks.indices) return
@@ -681,6 +748,7 @@ class PlayerService : Service() {
             requestFocus()
             it.start()
             applyPlaybackParams(it)
+            recordPlay(t)
             if (seekOnPrepare > 0) runCatching { it.seekTo(seekOnPrepare) }
             // Promote to a started foreground service so playback + the
             // shade controls survive the activity going away

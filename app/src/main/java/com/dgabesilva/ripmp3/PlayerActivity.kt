@@ -348,6 +348,8 @@ class PlayerActivity : AppCompatActivity(), DownloadEngine.Listener {
         item("▤ LOAD PLAYLIST") { loadPlaylistDialog() }
         item("✕ DELETE PLAYLIST") { deletePlaylistDialog() }
         item("♫ WHOLE LIBRARY") { clearSearch(); svc?.resetToLibrary() }
+        item("🔥 MOST PLAYED") { playSmart(svc?.buildMostPlayed(), "MOST PLAYED") }
+        item("🕐 RECENTLY PLAYED") { playSmart(svc?.buildRecent(), "RECENTLY PLAYED") }
         item("✎ EDIT TAGS") { editTagsDialog() }
         sep()
         item("🎚 EQUALIZER") { equalizerDialog() }
@@ -807,6 +809,36 @@ class PlayerActivity : AppCompatActivity(), DownloadEngine.Listener {
         }
     }
 
+    /** Destructive: deletes the actual file from the device after a confirm. */
+    private fun confirmDeleteFile(t: PlayerService.Track) {
+        waDialog("DELETE FILE") { root, dialog ->
+            root.addView(TextView(this).apply {
+                text = "Delete \"${t.title}\" from this device?\nThis can't be undone."
+                setTextColor(skinColor(R.attr.skinText))
+                textSize = 12f
+                typeface = Typeface.MONOSPACE
+                setPadding(0, 0, 0, (12 * density).toInt())
+            })
+            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            row.addView(dialogButton("DELETE") {
+                dialog.dismiss()
+                val ok = svc?.deleteTrackFile(t) ?: false
+                flashMarquee(if (ok) "DELETED: ${t.title}" else "COULDN'T DELETE FILE")
+            })
+            row.addView(dialogButton("CANCEL") { dialog.dismiss() })
+            root.addView(row)
+        }
+    }
+
+    /** Loads an auto-built queue (most-played / recent) into the player. */
+    private fun playSmart(list: List<PlayerService.Track>?, name: String) {
+        val q = list ?: emptyList()
+        if (q.isEmpty()) { flashMarquee("NO PLAY HISTORY YET"); return }
+        clearSearch()
+        svc?.setQueue(q, name)
+        flashMarquee("$name (${q.size} TRK)")
+    }
+
     /** Bevel-chrome dropdown menu anchored to [anchor] — used for a row's long-press options. */
     private fun popupMenu(anchor: View, items: List<Pair<String, () -> Unit>>) {
         val panel = LinearLayout(this).apply {
@@ -964,6 +996,9 @@ class PlayerActivity : AppCompatActivity(), DownloadEngine.Listener {
                             val i = s.tracks.indexOfFirst { it.file == t.file }
                             if (i >= 0) s.play(i)
                         },
+                        "⏭ PLAY NEXT" to {
+                            s.enqueueNext(listOf(t)); flashMarquee("PLAYS NEXT: ${t.title}")
+                        },
                         "✎ EDIT TAGS / RENAME" to { openTagEditor(t) },
                         "✕ REMOVE FROM QUEUE" to {
                             val i = s.tracks.indexOfFirst { it.file == t.file }
@@ -973,6 +1008,7 @@ class PlayerActivity : AppCompatActivity(), DownloadEngine.Listener {
                                 flashMarquee("REMOVED: ${t.title}")
                             }
                         },
+                        "🗑 DELETE FILE" to { confirmDeleteFile(t) },
                     ))
                 }
                 true

@@ -39,48 +39,53 @@
             android:textSize="12sp" />
     </LinearLayout>
 
-    <!-- Artist / Album / Songs tabs -->
-    <LinearLayout
+    <!-- Artist / Album / Songs / Genre / Folder tabs (scroll if they overflow) -->
+    <HorizontalScrollView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:layout_marginTop="8dp">
+        android:layout_marginTop="8dp"
+        android:scrollbars="none">
 
-        <TextView
-            android:id="@+id/tabArtists"
-            style="@style/WaChip"
-            android:layout_width="0dp"
-            android:layout_weight="1"
-            android:layout_height="36dp"
-            android:layout_marginEnd="4dp"
-            android:text="ARTISTS" />
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
 
-        <TextView
-            android:id="@+id/tabAlbums"
-            style="@style/WaChip"
-            android:layout_width="0dp"
-            android:layout_weight="1"
-            android:layout_height="36dp"
-            android:layout_marginEnd="4dp"
-            android:text="ALBUMS" />
+            <TextView
+                android:id="@+id/tabArtists"
+                style="@style/WaChip"
+                android:layout_height="36dp"
+                android:layout_marginEnd="4dp"
+                android:text="ARTISTS" />
 
-        <TextView
-            android:id="@+id/tabSongs"
-            style="@style/WaChip"
-            android:layout_width="0dp"
-            android:layout_weight="1"
-            android:layout_height="36dp"
-            android:layout_marginEnd="4dp"
-            android:text="SONGS" />
+            <TextView
+                android:id="@+id/tabAlbums"
+                style="@style/WaChip"
+                android:layout_height="36dp"
+                android:layout_marginEnd="4dp"
+                android:text="ALBUMS" />
 
-        <TextView
-            android:id="@+id/tabGenre"
-            style="@style/WaChip"
-            android:layout_width="0dp"
-            android:layout_weight="1"
-            android:layout_height="36dp"
-            android:text="GENRE" />
-    </LinearLayout>
+            <TextView
+                android:id="@+id/tabSongs"
+                style="@style/WaChip"
+                android:layout_height="36dp"
+                android:layout_marginEnd="4dp"
+                android:text="SONGS" />
+
+            <TextView
+                android:id="@+id/tabGenre"
+                style="@style/WaChip"
+                android:layout_height="36dp"
+                android:layout_marginEnd="4dp"
+                android:text="GENRE" />
+
+            <TextView
+                android:id="@+id/tabFolder"
+                style="@style/WaChip"
+                android:layout_height="36dp"
+                android:text="FOLDER" />
+        </LinearLayout>
+    </HorizontalScrollView>
 
     <EditText
         android:id="@+id/searchInput"
