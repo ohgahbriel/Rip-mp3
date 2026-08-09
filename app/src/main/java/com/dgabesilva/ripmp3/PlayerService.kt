@@ -6,11 +6,19 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.provider.MediaStore
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.drawable.Icon
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
+import android.media.AudioManager
 import android.media.MediaMetadata
 import android.media.MediaMetadataRetriever
 import android.media.MediaPlayer
@@ -21,6 +29,8 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
+import androidx.core.content.ContextCompat
 import java.io.File
 import java.util.Locale
 import kotlin.concurrent.thread
@@ -70,6 +80,61 @@ class PlayerService : Service() {
     private var session: MediaSession? = null
     private val main = Handler(Looper.getMainLooper())
 
+    // ---------- Audio focus / output routing ----------
+    private val audioManager by lazy { getSystemService(AUDIO_SERVICE) as AudioManager }
+    private var focusRequest: AudioFocusRequest? = null
+    private var resumeOnFocusGain = false   // true only after a *transient* loss we should recover from
+    private var ducked = false
+
+    private val audioAttributes: AudioAttributes by lazy {
+        AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_MEDIA)
+            .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+            .build()
+    }
+
+    // Cached decode of the current file's embedded cover, so setMetadata (called
+    // on every state change) doesn't re-read the file each time — only when the
+    // track actually changes.
+    private var artCache: Pair<String, Bitmap?>? = null
+
+    // ---------- Resume + smart shuffle ----------
+    // Restored-session resume point: only honored when play() is asked for
+    // exactly [resumeIndex], so tapping a *different* track after a restore
+    // starts it from 0 rather than inheriting the saved position.
+    private var resumeIndex = -1
+    private var resumePositionMs = 0
+    private var sessionRestored = false
+    // Shuffle as a bag of not-yet-played indices + a back-stack, instead of a
+    // bare random pick that can replay a song two tracks later.
+    private var shuffleBag = mutableListOf<Int>()
+    private val shuffleHistory = ArrayDeque<Int>()
+
+    private val focusListener = AudioManager.OnAudioFocusChangeListener { change ->
+        when (change) {
+            // Someone took focus for good (another music app) — stop and don't
+            // silently resume over them later.
+            AudioManager.AUDIOFOCUS_LOSS -> { resumeOnFocusGain = false; pause() }
+            // A phone call / transient sound — pause, but remember to pick back
+            // up if we were playing.
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> { resumeOnFocusGain = isPlaying; pause() }
+            // A nav prompt / notification — duck instead of pausing.
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> { ducked = true; applyDuck() }
+            AudioManager.AUDIOFOCUS_GAIN -> {
+                if (ducked) { ducked = false; applyDuck() }
+                if (resumeOnFocusGain) { resumeOnFocusGain = false; resume() }
+            }
+        }
+    }
+
+    // Headphones unplugged / bluetooth disconnected: pause instead of blasting
+    // the track out of the phone speaker.
+    private val noisyReceiver = object : BroadcastReceiver() {
+        override fun onReceive(c: Context?, i: Intent?) {
+            if (i?.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY) pause()
+        }
+    }
+
     val isPlaying get() = prepared && runCatching { mp?.isPlaying == true }.getOrDefault(false)
     val positionMs get() = if (prepared) runCatching { mp?.currentPosition ?: 0 }.getOrDefault(0) else 0
     val durationMs get() = if (prepared) runCatching { mp?.duration ?: 0 }.getOrDefault(0) else 0
@@ -103,7 +168,57 @@ class PlayerService : Service() {
             })
             isActive = true
         }
+        ContextCompat.registerReceiver(
+            this, noisyReceiver,
+            IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
         loadTracks()
+    }
+
+    // ---------- Audio focus helpers ----------
+
+    private fun applyDuck() {
+        val v = if (ducked) volume * 0.3f else volume
+        runCatching { mp?.setVolume(v * v, v * v) }
+    }
+
+    /** Asks the system for playback focus; true if granted. */
+    private fun requestFocus(): Boolean {
+        val res = if (Build.VERSION.SDK_INT >= 26) {
+            val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                .setAudioAttributes(audioAttributes)
+                .setOnAudioFocusChangeListener(focusListener)
+                .setWillPauseWhenDucked(false)
+                .build()
+            focusRequest = req
+            audioManager.requestAudioFocus(req)
+        } else {
+            @Suppress("DEPRECATION")
+            audioManager.requestAudioFocus(focusListener, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN)
+        }
+        return res == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+    }
+
+    private fun abandonFocus() {
+        if (Build.VERSION.SDK_INT >= 26) focusRequest?.let { audioManager.abandonAudioFocusRequest(it) }
+        else @Suppress("DEPRECATION") audioManager.abandonAudioFocus(focusListener)
+    }
+
+    /** Embedded cover art for [t], decoded once and cached by path. Null when the file has none. */
+    private fun albumArt(t: Track): Bitmap? {
+        artCache?.let { if (it.first == t.file.absolutePath) return it.second }
+        val bmp = runCatching {
+            val mmr = MediaMetadataRetriever()
+            try {
+                mmr.setDataSource(t.file.absolutePath)
+                mmr.embeddedPicture?.let { BitmapFactory.decodeByteArray(it, 0, it.size) }
+            } finally {
+                runCatching { mmr.release() }
+            }
+        }.getOrNull()
+        artCache = t.file.absolutePath to bmp
+        return bmp
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -126,8 +241,10 @@ class PlayerService : Service() {
         tracks.addAll(list)
         queueName = name
         current = if (playingFile != null) tracks.indexOfFirst { it.file == playingFile } else -1
+        clearShuffleState()
         listener?.onTracksReloaded()
         if (autoplay && tracks.isNotEmpty()) play(if (startIndex >= 0) startIndex else 0)
+        saveState()
     }
 
     /** Appends without duplicates. Returns how many were actually added. */
@@ -135,7 +252,9 @@ class PlayerService : Service() {
         val have = tracks.mapTo(HashSet()) { it.file.absolutePath }
         val add = list.filter { it.file.absolutePath !in have }
         tracks.addAll(add)
+        clearShuffleState()
         listener?.onTracksReloaded()
+        saveState()
         return add.size
     }
 
@@ -146,7 +265,9 @@ class PlayerService : Service() {
         val t = tracks.removeAt(from)
         tracks.add(to, t)
         current = if (playingFile != null) tracks.indexOfFirst { it.file == playingFile } else current
+        clearShuffleState()
         listener?.onTracksReloaded()
+        saveState()
     }
 
     /** Column-header sort: reorders the queue in place, keeping playback position stable. */
@@ -154,7 +275,9 @@ class PlayerService : Service() {
         val playingFile = currentTrack?.file
         tracks.sortWith(comparator)
         current = if (playingFile != null) tracks.indexOfFirst { it.file == playingFile } else current
+        clearShuffleState()
         listener?.onTracksReloaded()
+        saveState()
     }
 
     fun newQueue() = setQueue(emptyList(), "NEW LIST")
@@ -164,6 +287,53 @@ class PlayerService : Service() {
     fun renameQueue(name: String) {
         queueName = name
         listener?.onTracksReloaded()
+        saveState()
+    }
+
+    // ---------- Session persistence (resume where you left off) ----------
+
+    private fun statePrefs() = getSharedPreferences("player_state", MODE_PRIVATE)
+
+    /** Snapshots the queue + current position so the next launch can resume it. Cheap; called at every settling point. */
+    private fun saveState() {
+        runCatching {
+            statePrefs().edit()
+                .putString("q_name", queueName)
+                .putString("q_paths", tracks.joinToString("\n") { it.file.absolutePath })
+                .putInt("q_index", current)
+                .putInt("q_pos", positionMs)
+                .putBoolean("shuffle", shuffle)
+                .putBoolean("repeat", repeatAll)
+                .apply()
+        }
+    }
+
+    /**
+     * Rebuilds the last session's queue from saved file paths (skipping any that
+     * no longer exist) and restores index / shuffle / repeat, leaving
+     * [resumeIndex]/[resumePositionMs] set so the saved position is honored on the next play.
+     * Does NOT auto-play — just makes the app reopen exactly where it was.
+     */
+    private fun restoreSavedSession(lib: List<Track>): Boolean {
+        val p = statePrefs()
+        val paths = p.getString("q_paths", null)?.split("\n")?.filter { it.isNotEmpty() } ?: return false
+        if (paths.isEmpty()) return false
+        val byPath = lib.associateBy { it.file.absolutePath }
+        val restored = paths.mapNotNull { path ->
+            byPath[path] ?: File(path).takeIf { it.exists() }?.let { f -> Track(f, f.nameWithoutExtension) }
+        }
+        if (restored.isEmpty()) return false
+        tracks.clear(); tracks.addAll(restored)
+        queueName = p.getString("q_name", "LIBRARY") ?: "LIBRARY"
+        shuffle = p.getBoolean("shuffle", false)
+        repeatAll = p.getBoolean("repeat", false)
+        val idx = p.getInt("q_index", -1)
+        current = if (idx in tracks.indices) idx else -1
+        resumeIndex = current
+        resumePositionMs = p.getInt("q_pos", 0).coerceAtLeast(0)
+        clearShuffleState()
+        currentTrack?.let { listener?.onTrackChanged(current, it) }
+        return true
     }
 
     fun hasAudioPermission(): Boolean =
@@ -245,7 +415,14 @@ class PlayerService : Service() {
             main.post {
                 library.clear()
                 library.addAll(list)
-                if (queueName == "LIBRARY") {
+                // First scan after launch: try to reopen the last session. If
+                // there's nothing saved (or none of it survives), fall through
+                // to the default whole-library queue.
+                val didRestore = if (!sessionRestored) {
+                    sessionRestored = true
+                    restoreSavedSession(list)
+                } else false
+                if (!didRestore && queueName == "LIBRARY") {
                     val playingFile = currentTrack?.file
                     tracks.clear()
                     tracks.addAll(list)
@@ -294,6 +471,9 @@ class PlayerService : Service() {
     fun play(index: Int) {
         if (tracks.isEmpty()) return
         val idx = index.coerceIn(0, tracks.size - 1)
+        // Resume point applies only to the exact track we saved it for.
+        val seekOnPrepare = if (idx == resumeIndex) resumePositionMs else 0
+        resumeIndex = -1; resumePositionMs = 0
         releasePlayer()
         current = idx
         val t = tracks[idx]
@@ -301,17 +481,25 @@ class PlayerService : Service() {
 
         val p = MediaPlayer()
         mp = p
+        // Keep the CPU alive while playing with the screen off, and tag the
+        // stream as media so the system routes/ducks it correctly.
+        p.setWakeMode(applicationContext, PowerManager.PARTIAL_WAKE_LOCK)
+        runCatching { p.setAudioAttributes(audioAttributes) }
         p.setOnPreparedListener {
             prepared = true
             if (t.durationMs == 0) t.durationMs = it.duration
+            ducked = false
             it.setVolume(volume * volume, volume * volume)
+            requestFocus()
             it.start()
+            if (seekOnPrepare > 0) runCatching { it.seekTo(seekOnPrepare) }
             // Promote to a started foreground service so playback + the
             // shade controls survive the activity going away
             startService(Intent(this, PlayerService::class.java))
             updateSession(PlaybackState.STATE_PLAYING)
             goForeground()
             listener?.onPlayState(true)
+            saveState()
         }
         p.setOnCompletionListener { onTrackEnd() }
         p.setOnErrorListener { _, _, _ ->
@@ -334,6 +522,8 @@ class PlayerService : Service() {
             return
         }
         if (!p.isPlaying) {
+            ducked = false
+            requestFocus()
             runCatching { p.start() }
             updateSession(PlaybackState.STATE_PLAYING)
             goForeground()
@@ -348,6 +538,7 @@ class PlayerService : Service() {
             updateSession(PlaybackState.STATE_PAUSED)
             notifyPaused()
             listener?.onPlayState(false)
+            saveState()
         }
     }
 
@@ -360,6 +551,7 @@ class PlayerService : Service() {
         updateSession(PlaybackState.STATE_STOPPED)
         notifyPaused()
         listener?.onPlayState(false)
+        saveState()
     }
 
     fun step(dir: Int) {
@@ -371,6 +563,7 @@ class PlayerService : Service() {
     fun seekTo(ms: Int) {
         if (prepared) runCatching { mp?.seekTo(ms) }
         updateSession(if (isPlaying) PlaybackState.STATE_PLAYING else PlaybackState.STATE_PAUSED)
+        saveState()
     }
 
     private fun onTrackEnd() {
@@ -386,9 +579,21 @@ class PlayerService : Service() {
     private fun nextIndex(dir: Int): Int? {
         if (tracks.isEmpty()) return null
         if (shuffle && tracks.size > 1) {
-            var r: Int
-            do { r = Random.nextInt(tracks.size) } while (r == current)
-            return r
+            if (dir < 0) {
+                // Prev walks back through the actual play history, not a fresh random.
+                val prev = shuffleHistory.removeLastOrNull()
+                return prev?.takeIf { it in tracks.indices } ?: current
+            }
+            if (current in tracks.indices) {
+                shuffleHistory.addLast(current)
+                while (shuffleHistory.size > tracks.size) shuffleHistory.removeFirst()
+            }
+            if (shuffleBag.isEmpty()) {
+                // New cycle: every other track once, in a fresh random order.
+                shuffleBag = tracks.indices.filter { it != current }.shuffled(Random).toMutableList()
+                if (shuffleBag.isEmpty()) shuffleBag.add(current)
+            }
+            return shuffleBag.removeAt(0)
         }
         val n = current + dir
         return when {
@@ -396,6 +601,12 @@ class PlayerService : Service() {
             repeatAll -> (n + tracks.size) % tracks.size
             else -> null
         }
+    }
+
+    /** Queue changed under us — drop stale shuffle indices so the next pick refills cleanly. */
+    private fun clearShuffleState() {
+        shuffleBag.clear()
+        shuffleHistory.clear()
     }
 
     private fun releasePlayer() {
@@ -419,13 +630,18 @@ class PlayerService : Service() {
                 .build()
         )
         currentTrack?.let {
-            session?.setMetadata(
-                MediaMetadata.Builder()
-                    .putString(MediaMetadata.METADATA_KEY_TITLE, it.title)
-                    .putString(MediaMetadata.METADATA_KEY_ARTIST, "RIP // MP3")
-                    .putLong(MediaMetadata.METADATA_KEY_DURATION, durationMs.toLong())
-                    .build()
-            )
+            // Show the real artist on the lock screen / Bluetooth / Android Auto;
+            // fall back to the app name only for our own untagged downloads.
+            val artist = it.artist.takeUnless { a ->
+                a.isBlank() || a == "Unknown Artist" || a == "RIP DOWNLOADS"
+            } ?: "RIP // MP3"
+            val meta = MediaMetadata.Builder()
+                .putString(MediaMetadata.METADATA_KEY_TITLE, it.title)
+                .putString(MediaMetadata.METADATA_KEY_ARTIST, artist)
+                .putString(MediaMetadata.METADATA_KEY_ALBUM, it.album)
+                .putLong(MediaMetadata.METADATA_KEY_DURATION, durationMs.toLong())
+            albumArt(it)?.let { art -> meta.putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, art) }
+            session?.setMetadata(meta.build())
         }
     }
 
@@ -494,13 +710,17 @@ class PlayerService : Service() {
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         super.onTaskRemoved(rootIntent)
+        saveState()
         if (!isPlaying) stopSelf()
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        saveState()
         stopForeground(STOP_FOREGROUND_REMOVE)
         releasePlayer()
+        runCatching { unregisterReceiver(noisyReceiver) }
+        abandonFocus()
         session?.release()
         session = null
     }

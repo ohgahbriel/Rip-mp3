@@ -1,0 +1,28 @@
+<!--
+  App / launcher icon: Winamp-style green spectrum bars on the CLASSIC GREEN
+  skin's ink background, with one amber accent bar (skinAccent). Self-contained
+  vector — no raster assets — valid as a launcher icon on API 21+. Viewport is
+  108dp so it sits safely inside the adaptive-icon mask.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Ink background (skinBg) -->
+    <path
+        android:fillColor="#16161F"
+        android:pathData="M0,0 h108 v108 h-108 z" />
+
+    <!-- LCD-glass inset panel -->
+    <path
+        android:fillColor="#060609"
+        android:pathData="M22,24 h64 a4,4 0 0 1 4,4 v52 a4,4 0 0 1 -4,4 h-64 a4,4 0 0 1 -4,-4 v-52 a4,4 0 0 1 4,-4 z" />
+
+    <!-- Spectrum bars (green = skinLcd, amber = skinAccent) -->
+    <path android:fillColor="#00E800" android:pathData="M28,74 L28,52 L38,52 L38,74 Z" />
+    <path android:fillColor="#E8C848" android:pathData="M43,74 L43,36 L53,36 L53,74 Z" />
+    <path android:fillColor="#00E800" android:pathData="M58,74 L58,46 L68,46 L68,74 Z" />
+    <path android:fillColor="#00E800" android:pathData="M73,74 L73,32 L83,32 L83,74 Z" />
+</vector>

@@ -5,6 +5,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Keep the CPU alive so playback doesn't stall with the screen off -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!-- Find and play songs anywhere on the phone -->
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
@@ -13,7 +15,8 @@
         android:allowBackup="true"
         android:requestLegacyExternalStorage="true"
         android:label="RIP MP3"
-        android:icon="@android:drawable/ic_btn_speak_now"
+        android:icon="@drawable/ic_ripmp3"
+        android:roundIcon="@drawable/ic_ripmp3"
         android:theme="@style/Theme.RipMp3">
 
         <!-- Player is home -->
