@@ -8,10 +8,9 @@ import android.content.Context
  * the Artist/Title split, and the tag-writing rename.
  *
  * Scope is whatever list of tracks the caller passes (the whole library, or the
- * tracks of one playlist). Only files the app is allowed to write — its own
- * downloads — are renamed; anything else is reported as [Plan.writable]==false
- * so the UI can show it was skipped (renaming other apps' music needs a separate
- * Android write-consent flow).
+ * tracks of one playlist). App-owned files (its own downloads) are renamed here
+ * directly; phone music is flagged [Plan.appOwned]==false so the caller can run
+ * it through the MediaStore write-consent flow ([MediaStoreRenamer]).
  */
 object LibraryOrganizer {
 
@@ -20,8 +19,18 @@ object LibraryOrganizer {
         TITLE_ARTIST("Title - Artist"),
     }
 
-    /** One proposed rename. [newBase] is the filename (no extension) it would take. */
-    data class Plan(val track: PlayerService.Track, val newBase: String, val writable: Boolean)
+    /**
+     * One proposed rename. [newBase] is the filename (no extension) it would
+     * take; [newTitle] is the clean song title (used when updating phone-music
+     * metadata). [appOwned] true = the app can rename it directly; false = it's
+     * phone music that needs the MediaStore write-consent path.
+     */
+    data class Plan(
+        val track: PlayerService.Track,
+        val newBase: String,
+        val newTitle: String,
+        val appOwned: Boolean,
+    )
 
     private fun isPlaceholderArtist(a: String) =
         a.isBlank() || a == "Unknown Artist" || a == "RIP DOWNLOADS"
@@ -50,22 +59,27 @@ object LibraryOrganizer {
     /** Builds the list of renames that would actually change something (skips already-correct names). */
     fun buildPlan(context: Context, tracks: List<PlayerService.Track>, tpl: Template): List<Plan> =
         tracks.mapNotNull { t ->
-            val base = newBase(t, tpl)
+            val (artist, title) = derive(t)
+            val base = TagCleaner.sanitize(when {
+                artist.isNullOrBlank() -> title
+                tpl == Template.ARTIST_TITLE -> "$artist - $title"
+                else -> "$title - $artist"
+            })
             if (base.isBlank() || base == t.file.nameWithoutExtension) null
-            else Plan(t, base, isWritable(context, t))
+            else Plan(t, base, title, isWritable(context, t))
         }
 
-    /** Applies the writable plans, retag+renaming each. Returns how many succeeded. */
+    /** Renames the app-owned plans directly (retag+rename). Phone-music plans are handled separately. Returns count done. */
     suspend fun apply(context: Context, plans: List<Plan>, onProgress: (done: Int, total: Int) -> Unit): Int {
-        val writable = plans.filter { it.writable }
+        val own = plans.filter { it.appOwned }
         var ok = 0
-        writable.forEachIndexed { i, p ->
+        own.forEachIndexed { i, p ->
             val (artist, title) = derive(p.track)
             runCatching {
                 TagCleaner.retagAndRename(context, p.track.file, artist, title, genre = null, destBaseName = p.newBase)
                 ok++
             }
-            onProgress(i + 1, writable.size)
+            onProgress(i + 1, own.size)
         }
         return ok
     }

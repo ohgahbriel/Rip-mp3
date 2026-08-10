@@ -15,8 +15,10 @@ import android.graphics.drawable.ColorDrawable
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.MediaStore
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
@@ -31,6 +33,8 @@ import android.widget.PopupWindow
 import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.TextView
+import androidx.activity.result.IntentSenderRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.recyclerview.widget.ItemTouchHelper
 import androidx.recyclerview.widget.LinearLayoutManager
@@ -54,6 +58,16 @@ class PlayerActivity : AppCompatActivity(), DownloadEngine.Listener {
     // ticker that runs only while the lyrics dialog is open.
     private val lyricsCache = HashMap<String, Lyrics.Result>()
     private var lyricsUpdater: Runnable? = null
+
+    // Organizer: phone-music (non-app) renames held here across the Android
+    // write-consent round-trip, applied once the user taps Allow.
+    private data class ExternalUpdate(val uri: Uri, val displayName: String, val title: String)
+    private var pendingExternal: List<ExternalUpdate> = emptyList()
+    private val writeConsent =
+        registerForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { r ->
+            if (r.resultCode == RESULT_OK) applyPendingExternal()
+            else { pendingExternal = emptyList(); flashMarquee("PERMISSION DENIED — PHONE SONGS UNCHANGED") }
+        }
 
     // ---------- Search filter ----------
     // Filters the queue view only (title/artist substring match); the
@@ -369,11 +383,15 @@ class PlayerActivity : AppCompatActivity(), DownloadEngine.Listener {
         item("◨ SKINS") { skinsDialog() }
         item("⟳ RESCAN LIBRARY") { svc?.loadTracks(); flashMarquee("RESCANNING…") }
         item("🧹 CLEAN UP TITLES") {
-            if (DownloadEngine.isDownloading) {
-                flashMarquee("BUSY — WAIT FOR THE CURRENT DOWNLOAD/CLEANUP TO FINISH")
-            } else {
-                flashMarquee("CLEANING UP TITLES…")
-                DownloadEngine.cleanupLibrary(this)
+            when {
+                DownloadEngine.isDownloading ->
+                    flashMarquee("BUSY — WAIT FOR THE CURRENT DOWNLOAD/CLEANUP TO FINISH")
+                !hasAppDownloads() ->
+                    flashMarquee("NO APP DOWNLOADS TO CLEAN — USE ORGANIZE LIBRARY FOR PHONE MUSIC")
+                else -> {
+                    flashMarquee("CLEANING UP TITLES…")
+                    DownloadEngine.cleanupLibrary(this)
+                }
             }
         }
         item("🗂 ORGANIZE LIBRARY") { organizeDialog() }
@@ -582,20 +600,20 @@ class PlayerActivity : AppCompatActivity(), DownloadEngine.Listener {
     /** Dry-run: shows every proposed old → new rename before anything is touched. */
     private fun previewOrganizeDialog(tracks: List<PlayerService.Track>, tpl: LibraryOrganizer.Template) {
         val plans = LibraryOrganizer.buildPlan(this, tracks, tpl)
-        val writable = plans.filter { it.writable }
-        val skipped = plans.size - writable.size
+        val phoneN = plans.count { !it.appOwned }
         waDialog("PREVIEW") { root, dialog ->
             root.addView(dialogLabel(
                 if (plans.isEmpty()) "ALREADY ORGANIZED — NOTHING TO RENAME"
-                else "${writable.size} TO RENAME" + if (skipped > 0) " · $skipped SKIPPED (NOT APP FILES)" else "",
+                else "${plans.size} TO RENAME" + if (phoneN > 0) " · $phoneN PHONE (WILL ASK PERMISSION)" else "",
                 accent = true
             ))
-            if (writable.isNotEmpty()) {
+            if (plans.isNotEmpty()) {
                 val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-                writable.take(300).forEach { p ->
+                plans.take(300).forEach { p ->
                     box.addView(TextView(this).apply {
                         text = "${p.track.file.nameWithoutExtension}\n→ ${p.newBase}"
-                        setTextColor(skinColor(R.attr.skinLcd))
+                        // Phone-music entries in the accent colour so it's clear which need consent.
+                        setTextColor(skinColor(if (p.appOwned) R.attr.skinLcd else R.attr.skinAccent))
                         textSize = 11f
                         typeface = Typeface.MONOSPACE
                         setPadding(0, (5 * density).toInt(), 0, (5 * density).toInt())
@@ -612,21 +630,75 @@ class PlayerActivity : AppCompatActivity(), DownloadEngine.Listener {
                 orientation = LinearLayout.HORIZONTAL
                 setPadding(0, (10 * density).toInt(), 0, 0)
             }
-            if (writable.isNotEmpty()) {
-                row.addView(dialogButton("APPLY (${writable.size})") {
-                    dialog.dismiss()
-                    flashMarquee("ORGANIZING…")
-                    scope.launch {
-                        val done = LibraryOrganizer.apply(this@PlayerActivity, plans) { d, t ->
-                            if (t > 0 && d % 5 == 0) flashMarquee("ORGANIZING $d/$t…")
-                        }
-                        svc?.loadTracks()
-                        flashMarquee("ORGANIZED $done FILE${if (done == 1) "" else "S"}")
-                    }
-                })
+            if (plans.isNotEmpty()) {
+                row.addView(dialogButton("APPLY (${plans.size})") { dialog.dismiss(); applyOrganize(plans) })
             }
-            row.addView(dialogButton(if (writable.isEmpty()) "CLOSE" else "CANCEL") { dialog.dismiss() })
+            row.addView(dialogButton(if (plans.isEmpty()) "CLOSE" else "CANCEL") { dialog.dismiss() })
             root.addView(row)
+        }
+    }
+
+    /** Renames app-owned files directly, then hands any phone-music plans to the consent flow. */
+    private fun applyOrganize(plans: List<LibraryOrganizer.Plan>) {
+        if (plans.isEmpty()) return
+        val external = plans.filter { !it.appOwned }
+        flashMarquee("ORGANIZING…")
+        scope.launch {
+            val done = LibraryOrganizer.apply(this@PlayerActivity, plans) { d, t ->
+                if (t > 0 && d % 5 == 0) flashMarquee("ORGANIZING $d/$t…")
+            }
+            if (external.isEmpty()) {
+                svc?.loadTracks()
+                flashMarquee("ORGANIZED $done FILE${if (done == 1) "" else "S"}")
+            } else {
+                startExternalConsent(external)
+            }
+        }
+    }
+
+    /** Resolves phone-music URIs and asks Android for one-time write permission over the batch. */
+    private fun startExternalConsent(external: List<LibraryOrganizer.Plan>) {
+        scope.launch {
+            val updates = withContext(Dispatchers.IO) {
+                external.mapNotNull { p ->
+                    MediaStoreRenamer.uriFor(this@PlayerActivity, p.track.file.absolutePath)?.let { uri ->
+                        ExternalUpdate(uri, "${p.newBase}.${p.track.file.extension}", p.newTitle)
+                    }
+                }
+            }
+            if (updates.isEmpty()) { svc?.loadTracks(); flashMarquee("DONE — NO PHONE SONGS MATCHED"); return@launch }
+            if (Build.VERSION.SDK_INT >= 30) {
+                pendingExternal = updates
+                runCatching {
+                    val pi = MediaStore.createWriteRequest(contentResolver, updates.map { it.uri })
+                    writeConsent.launch(IntentSenderRequest.Builder(pi.intentSender).build())
+                }.onFailure { pendingExternal = emptyList(); flashMarquee("COULDN'T REQUEST PERMISSION") }
+            } else {
+                svc?.loadTracks()
+                flashMarquee("PHONE-MUSIC RENAME NEEDS ANDROID 11+ (APP SONGS DONE)")
+            }
+        }
+    }
+
+    /** After the user allows the write, apply the MediaStore renames. */
+    private fun applyPendingExternal() {
+        val ups = pendingExternal
+        pendingExternal = emptyList()
+        if (ups.isEmpty()) return
+        flashMarquee("ORGANIZING PHONE SONGS…")
+        scope.launch {
+            val ok = withContext(Dispatchers.IO) {
+                ups.count { MediaStoreRenamer.applyUpdate(this@PlayerActivity, it.uri, it.displayName, it.title) }
+            }
+            svc?.loadTracks()
+            flashMarquee("ORGANIZED $ok PHONE SONG${if (ok == 1) "" else "S"}")
+        }
+    }
+
+    private fun hasAppDownloads(): Boolean {
+        val dir = File(getExternalFilesDir(null), "MP3")
+        return dir.isDirectory && dir.walkTopDown().any {
+            it.isFile && (it.extension.equals("mp3", true) || it.extension.equals("flac", true))
         }
     }
 
