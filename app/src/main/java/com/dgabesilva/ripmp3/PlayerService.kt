@@ -74,16 +74,61 @@ class PlayerService : Service() {
     var queueName = "LIBRARY"; private set
     var current = -1; private set
 
-    // Shuffle / repeat are backed by ExoPlayer; the fields are the source of
-    // truth for persistence and are applied to the player whenever they change.
+    // Shuffle is a custom no-repeat picker, not ExoPlayer's built-in shuffle
+    // (which reshuffles from scratch on every queue rebuild and can replay a
+    // song shortly after it played). While shuffling we borrow ExoPlayer's
+    // REPEAT_MODE_ONE purely as a hook: instead of letting a finished track
+    // loop, onMediaItemTransition's REPEAT reason redirects to a random track
+    // that hasn't played yet this cycle. repeatAll (independent toggle) decides
+    // whether a fully-played cycle reshuffles or playback just pauses.
     private var _shuffle = false
     var shuffle: Boolean
         get() = _shuffle
-        set(v) { _shuffle = v; player?.shuffleModeEnabled = v; saveState() }
+        set(v) {
+            _shuffle = v
+            applyRepeatMode()
+            if (v) {
+                shufflePlayed.clear()
+                currentTrack?.file?.absolutePath?.let { shufflePlayed.add(it) }
+                shuffleHistory.clear()
+            }
+            saveState()
+        }
     private var _repeatAll = false
     var repeatAll: Boolean
         get() = _repeatAll
-        set(v) { _repeatAll = v; player?.repeatMode = if (v) Player.REPEAT_MODE_ALL else Player.REPEAT_MODE_OFF; saveState() }
+        set(v) { _repeatAll = v; applyRepeatMode(); saveState() }
+    private fun applyRepeatMode() {
+        player?.repeatMode = when {
+            _shuffle -> Player.REPEAT_MODE_ONE
+            _repeatAll -> Player.REPEAT_MODE_ALL
+            else -> Player.REPEAT_MODE_OFF
+        }
+    }
+
+    // File paths already played in the current shuffle cycle (cleared and
+    // reseeded with just the current track when a cycle completes and
+    // repeatAll allows a fresh one), plus a small stack for shuffle-aware
+    // Previous.
+    private val shufflePlayed = HashSet<String>()
+    private val shuffleHistory = mutableListOf<String>()
+
+    /** Random pick from tracks not yet played this shuffle cycle; null if nothing's left and repeatAll is off. */
+    private fun pickShuffledNext(): Int? {
+        if (tracks.isEmpty()) return null
+        val curPath = currentTrack?.file?.absolutePath
+        var pool = tracks.indices.filter {
+            tracks[it].file.absolutePath != curPath && tracks[it].file.absolutePath !in shufflePlayed
+        }
+        if (pool.isEmpty()) {
+            if (!repeatAll) return null
+            shufflePlayed.clear()
+            curPath?.let { shufflePlayed.add(it) }
+            pool = tracks.indices.filter { tracks[it].file.absolutePath != curPath }
+            if (pool.isEmpty()) return null
+        }
+        return pool.random()
+    }
 
     var listener: Listener? = null
     var volume = 0.8f
@@ -141,10 +186,26 @@ class PlayerService : Service() {
 
     private val playerListener = object : Player.Listener {
         override fun onMediaItemTransition(item: MediaItem?, reason: Int) {
+            if (shuffle && reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT) {
+                // A track finished; REPEAT_MODE_ONE is only active to give us this
+                // hook. Redirect to a random not-yet-played track instead of
+                // looping the one that just ended.
+                val next = pickShuffledNext()
+                if (next != null) play(next) else pause()
+                return
+            }
+            val prevPath = currentTrack?.file?.absolutePath
             val idx = player?.currentMediaItemIndex ?: -1
             current = if (idx in tracks.indices) idx else -1
             clearLoop() // A-B loop is per-track
             val t = currentTrack
+            if (shuffle) {
+                if (prevPath != null && prevPath != t?.file?.absolutePath) {
+                    shuffleHistory.add(prevPath)
+                    if (shuffleHistory.size > 300) shuffleHistory.removeAt(0)
+                }
+                t?.let { shufflePlayed.add(it.file.absolutePath) }
+            }
             listener?.onTrackChanged(current, t)
             // Count a play only when we're actually going to play it (not on the
             // paused restore/setMediaItems that also fires this callback).
@@ -177,8 +238,13 @@ class PlayerService : Service() {
         }
 
         override fun onPlayerError(error: PlaybackException) {
-            // A bad/missing file — skip to the next rather than wedging.
-            player?.let { if (it.hasNextMediaItem()) it.seekToNextMediaItem() }
+            // A bad/missing file, skip to the next rather than wedging.
+            if (shuffle) {
+                val next = pickShuffledNext()
+                if (next != null) play(next) else pause()
+            } else {
+                player?.let { if (it.hasNextMediaItem()) it.seekToNextMediaItem() }
+            }
         }
     }
 
@@ -197,7 +263,11 @@ class PlayerService : Service() {
                 override fun onSkipToNext() { step(+1) }
                 override fun onSkipToPrevious() { step(-1) }
                 override fun onSeekTo(pos: Long) { seekTo(pos.toInt()) }
-                override fun onStop() { stopToZero() }
+                // A system-level STOP (Bluetooth/car head unit, another app taking
+                // over the session, etc.) is an interruption, not a user-requested
+                // stop, so just pause in place instead of resetting to zero. The
+                // explicit Stop button in the UI calls stopToZero() directly.
+                override fun onStop() { pause() }
             })
             isActive = true
         }
@@ -431,6 +501,11 @@ class PlayerService : Service() {
         val startPos = if (keepingCurrent) positionMs.toLong() else 0L
         val play = autoplay || (keepingCurrent && isPlaying)
         syncPlayerItems(idx, startPos, play)
+        if (shuffle) {
+            shufflePlayed.clear()
+            shuffleHistory.clear()
+            currentTrack?.file?.absolutePath?.let { shufflePlayed.add(it) }
+        }
         listener?.onTracksReloaded()
         saveState()
     }
@@ -765,6 +840,19 @@ class PlayerService : Service() {
     fun step(dir: Int) {
         val p = player ?: return
         if (tracks.isEmpty()) return
+        if (shuffle) {
+            if (dir > 0) {
+                val next = pickShuffledNext() ?: return
+                play(next)
+            } else {
+                while (shuffleHistory.isNotEmpty()) {
+                    val path = shuffleHistory.removeAt(shuffleHistory.size - 1)
+                    val idx = tracks.indexOfFirst { it.file.absolutePath == path }
+                    if (idx >= 0) { play(idx); return }
+                }
+            }
+            return
+        }
         if (dir > 0) p.seekToNextMediaItem() else p.seekToPreviousMediaItem()
     }
 
